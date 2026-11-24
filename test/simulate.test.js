@@ -1045,5 +1045,7 @@ test('security: bad Twilio signature is 403, tool endpoint needs X-Tool-Secret a
   assert.equal((await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'x' }, null)).status, 401);
   assert.equal((await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'x' }, 'wrong-secret')).status, 401);
   assert.equal((await s.json('/tool/request-transfer', { call_sid: 'nope', summary: 'x' })).status, 400);
+  // A tool that sends the SID as parent_call_sid is understood too (404 = well-formed, unknown call).
+  assert.equal((await s.json('/tool/request-transfer', { parent_call_sid: RESIDENT, summary: 'x' })).status, 404);
   assert.equal((await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'x' })).status, 404, 'unknown call');
 });
