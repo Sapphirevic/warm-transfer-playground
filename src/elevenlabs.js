@@ -38,4 +38,54 @@ function createRegisterCall(config) {
   };
 }
 
-module.exports = { createRegisterCall };
+// Reads conversations (and their transcripts) back from ElevenLabs.
+function createConversationApi(config) {
+  async function api(pathAndQuery) {
+    const response = await fetch(`${config.elevenLabsApiBase}${pathAndQuery}`, {
+      headers: { 'xi-api-key': config.elevenLabsApiKey },
+      signal: AbortSignal.timeout(8_000),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw Object.assign(new Error(`ElevenLabs HTTP ${response.status}: ${text.slice(0, 200)}`), { status: response.status });
+    }
+    return JSON.parse(text);
+  }
+
+  function list(callSid, startedAfterUnix, withFilter) {
+    const query = new URLSearchParams({
+      agent_id: config.elevenLabsAgentId,
+      page_size: '20',
+      call_start_after_unix: String(startedAfterUnix),
+    });
+    // Every call is registered with the dynamic variable call_sid = the resident's Twilio call SID.
+    if (withFilter) query.set('dynamic_variable_filter', `call_sid:eq:${callSid}`);
+    return api(`/v1/convai/conversations?${query}`);
+  }
+
+  return {
+    // Full details (including the transcript) of every conversation that belongs to one
+    // resident call. Usually one; two if Ava had to be brought back during the call.
+    async forCall(callSid, startedAfterUnix) {
+      let page;
+      try {
+        page = await list(callSid, startedAfterUnix, true);
+      } catch (err) {
+        if (!(err.status >= 400 && err.status < 500) || err.status === 401) throw err;
+        // The filter was not accepted: list recent conversations and pick ours out below.
+        page = await list(callSid, startedAfterUnix, false);
+      }
+
+      const details = [];
+      for (const item of page.conversations || []) {
+        const detail = await api(`/v1/convai/conversations/${encodeURIComponent(item.conversation_id)}`);
+        // Never trust the filter alone: only keep conversations that really carry this call SID.
+        const variables = (detail.conversation_initiation_client_data || {}).dynamic_variables || {};
+        if (variables.call_sid === callSid) details.push(detail);
+      }
+      return details;
+    },
+  };
+}
+
+module.exports = { createRegisterCall, createConversationApi };

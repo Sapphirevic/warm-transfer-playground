@@ -42,6 +42,12 @@ function loadConfig(env = process.env) {
     throw new Error(`DIAL_MODE must be "sequential" or "parallel", got "${env.DIAL_MODE}"`);
   }
 
+  const holdSetting = (env.HOLD_MUSIC_DELAY_SEC || '5').trim().toLowerCase();
+  const holdDelayMs = holdSetting === 'off' ? null : Number(holdSetting) * 1000;
+  if (holdDelayMs !== null && !(holdDelayMs >= 0)) {
+    throw new Error(`HOLD_MUSIC_DELAY_SEC must be a number of seconds or "off", got "${env.HOLD_MUSIC_DELAY_SEC}"`);
+  }
+
   const publicBaseUrl = env.PUBLIC_BASE_URL.trim().replace(/\/+$/, '');
   if (!/^https?:\/\//.test(publicBaseUrl)) {
     throw new Error('PUBLIC_BASE_URL must start with https:// (your ngrok URL, no trailing path)');
@@ -62,6 +68,12 @@ function loadConfig(env = process.env) {
     ringTimeoutSec: Number(env.RING_TIMEOUT_SEC) || 20,
     // TwiML App whose Voice URL is PUBLIC_BASE_URL/twilio/agent-leg. Ava joins the call through it.
     agentAppSid,
+    // Hold music for the resident while technicians are called. It starts this long after
+    // the tool call, so Ava can finish saying "please hold". null = no hold music.
+    holdDelayMs,
+    holdMusicUrl: (env.HOLD_MUSIC_URL || 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical').trim(),
+    // After a call ends, when to ask ElevenLabs for the transcript (it takes a moment to be ready).
+    transcriptRetryMs: [5_000, 20_000, 60_000],
     // Transfer reports (one JSON file per resident call) and optional audio such as connecting.mp3.
     reportsDir: path.join(PROJECT_ROOT, 'reports'),
     publicDir: path.join(PROJECT_ROOT, 'public'),

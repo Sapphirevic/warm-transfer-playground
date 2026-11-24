@@ -5,6 +5,7 @@
 // added to it as her own call leg (a TwiML App that returns the ElevenLabs
 // register-call TwiML), and a technician who presses 1 simply joins the same room.
 // Nobody is moved, so Ava's conversation carries on while the technician is there.
+// While the technician is in the room Ava is muted: she listens but is not heard.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -12,7 +13,7 @@ const path = require('path');
 const express = require('express');
 const twilio = require('twilio');
 const { E164_RE } = require('./config');
-const { createReportStore, buildReport, renderList, renderDetail } = require('./reports');
+const { createReportStore, buildReport, buildTranscript, renderList, renderDetail } = require('./reports');
 
 const { VoiceResponse } = twilio.twiml;
 
@@ -44,9 +45,10 @@ const roomName = (residentCallSid) => `room-${residentCallSid}`;
  * @param {object} deps.config        from loadConfig()
  * @param {object} deps.client        Twilio REST client (or a fake in tests)
  * @param {Function} deps.registerCall  from createRegisterCall()
+ * @param {object} [deps.conversations] from createConversationApi(); without it reports have no transcript
  * @param {Function} [deps.logger]
  */
-function createApp({ config, client, registerCall, logger = console.log }) {
+function createApp({ config, client, registerCall, conversations = null, logger = console.log }) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -141,6 +143,62 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     }
   }
 
+  // ---------------------------------------------------------------- transcripts
+
+  const transcriptFetches = new Map(); // resident CallSid -> fetch in progress
+
+  function storeTranscript(residentCallSid, transcript) {
+    const t = transfers.get(residentCallSid);
+    if (t) {
+      t.transcript = transcript;
+      return saveReport(t);
+    }
+    // After a restart the call is no longer in memory: update the saved file directly.
+    const stored = reports.get(residentCallSid);
+    if (stored) reports.save({ ...stored, transcript });
+  }
+
+  // Fetches the conversation(s) for one resident call from ElevenLabs and stores the
+  // transcript with the report. Does nothing once the transcript is final.
+  function refreshTranscript(residentCallSid) {
+    if (!conversations) return Promise.resolve();
+    const stored = reports.get(residentCallSid);
+    if (!stored || (stored.transcript && stored.transcript.status === 'final')) return Promise.resolve();
+    if (transcriptFetches.has(residentCallSid)) return transcriptFetches.get(residentCallSid);
+
+    const fetching = (async () => {
+      let transcript;
+      try {
+        // Ava's conversation starts before the tool call, so look back generously.
+        const startedAfter = Math.floor(Date.parse(stored.started_at) / 1000) - 6 * 3600;
+        transcript = buildTranscript(await conversations.forCall(residentCallSid, startedAfter));
+        const lines = transcript.conversations.reduce((n, c) => n + c.entries.length, 0);
+        log(`TRANSCRIPT resident=${residentCallSid} ${transcript.status}: ${transcript.conversations.length} conversation(s), ${lines} line(s)`);
+      } catch (err) {
+        log(`ERROR could not fetch transcript for resident=${residentCallSid}: ${err.message}`);
+        // Keep whatever we already had and say why it could not be refreshed.
+        transcript = {
+          status: 'unavailable',
+          fetched_at: new Date().toISOString(),
+          error: err.message,
+          conversations: (stored.transcript && stored.transcript.conversations) || [],
+        };
+      }
+      storeTranscript(residentCallSid, transcript);
+    })().finally(() => transcriptFetches.delete(residentCallSid));
+
+    transcriptFetches.set(residentCallSid, fetching);
+    return fetching;
+  }
+
+  // ElevenLabs needs a little while after the call to finish the transcript, so try a few times.
+  function scheduleTranscript(residentCallSid) {
+    if (!conversations || !transfers.has(residentCallSid)) return;
+    for (const delay of config.transcriptRetryMs || []) {
+      setTimeout(() => refreshTranscript(residentCallSid), delay).unref();
+    }
+  }
+
   // The transfer is over, one way or another: store the result and print the one-line summary.
   function finish(t, result, at = Date.now()) {
     if (t.result) return;
@@ -168,7 +226,9 @@ function createApp({ config, client, registerCall, logger = console.log }) {
       conferenceSid: null,
       present: new Set(), // call SIDs in the room right now
       // state: none -> joining -> in -> left
-      agent: { state: 'none', callSid: null, joins: 0, firstMessage: null },
+      agent: { state: 'none', callSid: null, joins: 0, firstMessage: null, muted: false },
+      onHold: false, //                    resident is hearing hold music
+      roomQueue: Promise.resolve(), //     see inOrder()
     };
   }
 
@@ -279,14 +339,88 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     }
   }));
 
+  // While a technician is in the room Ava must not be heard. Muting her leg guarantees
+  // that whatever the model decides to say. She still hears everything, so her
+  // transcript keeps covering the conversation. Resolves to true if the change was made.
+  function setAgentMuted(residentCallSid, muted, why) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || resident.ended || !resident.conferenceSid) return Promise.resolve(false);
+    const { agent } = resident;
+    if (agent.state !== 'in' || !agent.callSid || agent.muted === muted) return Promise.resolve(false);
+    agent.muted = muted;
+    return inOrder(resident, async () => {
+      try {
+        await client.conferences(resident.conferenceSid).participants(agent.callSid).update({ muted });
+        log(`AGENT Ava ${muted ? 'muted' : 'unmuted'} in ${roomName(residentCallSid)} (${why})`);
+        return true;
+      } catch (err) {
+        agent.muted = !muted;
+        log(`ERROR could not ${muted ? 'mute' : 'unmute'} Ava in ${roomName(residentCallSid)}: ${twilioError(err)}`);
+        return false;
+      }
+    });
+  }
+
+  // Changes to one room (hold, mute, announcements) are sent to Twilio one after
+  // another, so that for example "take off hold" can never overtake "put on hold".
+  function inOrder(resident, task) {
+    const run = resident.roomQueue.then(task);
+    resident.roomQueue = run.catch(() => {});
+    return run;
+  }
+
+  // Hold music for the resident while technicians are being called. A participant on
+  // hold hears the music instead of the room, and the room does not hear them.
+  // Resolves to true if the change was made.
+  function setResidentHold(residentCallSid, hold, why) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || resident.ended || !resident.conferenceSid || resident.onHold === hold) return Promise.resolve(false);
+    resident.onHold = hold;
+    const options = hold ? { hold: true, holdUrl: config.holdMusicUrl, holdMethod: 'GET' } : { hold: false };
+    return inOrder(resident, async () => {
+      try {
+        await client.conferences(resident.conferenceSid).participants(residentCallSid).update(options);
+        log(`HOLD resident=${residentCallSid} ${hold ? 'on hold with music' : 'off hold'} (${why})`);
+        return true;
+      } catch (err) {
+        resident.onHold = !hold;
+        log(`ERROR could not ${hold ? 'put resident on hold' : 'take resident off hold'} resident=${residentCallSid}: ${twilioError(err)}`);
+        return false;
+      }
+    });
+  }
+
+  // A few seconds after Ava asks for a technician (long enough for her to say
+  // "please hold"), the resident gets music and Ava is muted until the search ends.
+  function startHold(t) {
+    if (t.status !== 'searching') return;
+    const stamp = (field) => (changed) => {
+      if (!changed) return;
+      t[field] = Date.now();
+      saveReport(t);
+    };
+    setResidentHold(t.residentCallSid, true, 'searching for a technician').then(stamp('holdStartedAt'));
+    setAgentMuted(t.residentCallSid, true, 'resident is on hold').then(stamp('agentMutedAt'));
+  }
+
+  function endHold(t, why) {
+    return setResidentHold(t.residentCallSid, false, why).then((released) => {
+      if (!released) return;
+      t.holdEndedAt = Date.now();
+      saveReport(t);
+    });
+  }
+
   // Plays a short line (or public/connecting.mp3) to everyone in the room.
+  // Queued behind any pending hold or mute change, so the resident is off hold (and
+  // Ava silenced or given her voice back) before the line is spoken.
   function announce(residentCallSid, kind) {
     const resident = residentCalls.get(residentCallSid);
     if (!resident || !resident.conferenceSid) return;
-    client.conferences(resident.conferenceSid)
+    inOrder(resident, () => client.conferences(resident.conferenceSid)
       .update({ announceUrl: `${base}/conference/announce?kind=${kind}`, announceMethod: 'POST' })
       .then(() => log(`ANNOUNCE "${ANNOUNCEMENTS[kind]}" in ${roomName(residentCallSid)}`))
-      .catch((err) => log(`ERROR could not announce "${kind}" in ${roomName(residentCallSid)}: ${twilioError(err)}`));
+      .catch((err) => log(`ERROR could not announce "${kind}" in ${roomName(residentCallSid)}: ${twilioError(err)}`)));
   }
 
   app.post('/conference/announce', twilioHook, (req, res) => {
@@ -424,7 +558,14 @@ function createApp({ config, client, registerCall, logger = console.log }) {
 
     const resident = residentCalls.get(t.residentCallSid);
     if (!resident || resident.ended) return;
+    // The resident goes back to talking with Ava: music off, Ava's voice back on.
+    endHold(t, 'no technician available');
     if (resident.agent.state === 'in' || resident.agent.state === 'joining') {
+      setAgentMuted(t.residentCallSid, false, 'no technician available').then((unmuted) => {
+        if (!unmuted) return;
+        t.agentUnmutedAt = Date.now();
+        saveReport(t);
+      });
       announce(t.residentCallSid, 'unavailable');
     } else {
       log(`AGENT Ava is not in the room, bringing her back for resident=${t.residentCallSid}`);
@@ -442,6 +583,7 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     if (!resident || resident.ended) return;
     resident.ended = true;
     log(`RESIDENT gone resident=${residentCallSid} (${why})`);
+    scheduleTranscript(residentCallSid);
 
     const t = transfers.get(residentCallSid);
     if (t && (t.status === 'searching' || t.status === 'bridging')) {
@@ -544,7 +686,7 @@ function createApp({ config, client, registerCall, logger = console.log }) {
         return res.json({ status: 'unavailable', message: 'No technician is available right now. Offer to take a message.' });
       }
       if (existing.status === 'connected') {
-        return res.json({ status: 'connected', message: 'A technician is on the call now. Introduce the resident and the issue, then let them talk.' });
+        return res.json({ status: 'connected', message: 'A technician is on the call with the resident now. Say nothing and let them talk.' });
       }
       return res.json({ status: 'searching', message: 'A technician search is already running for this call. Ask the resident to keep holding.' });
     }
@@ -581,15 +723,23 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     timing(t, 'tool_call');
     saveReport(t);
 
+    const holdDelayMs = config.holdDelayMs;
+    const whileSearching = holdDelayMs === null
+      ? 'Tell the resident you are finding someone and keep talking with them. '
+      : 'Say one short sentence asking the resident to hold while you connect them with a technician, then say nothing more. ' +
+        `Hold music starts for the resident in about ${Math.round(holdDelayMs / 1000)} seconds and they cannot hear you while it plays. `;
+
     // Answer the tool straight away; the search carries on after this response.
     res.json({
       status: 'searching',
       message:
-        'Searching for a technician now. Tell the resident you are finding someone and keep talking with them. ' +
-        `You stay on the call. When you hear "${ANNOUNCEMENTS.joined}", a technician is on the line with you both: introduce the resident and summarise the issue. ` +
-        `If you hear "${ANNOUNCEMENTS.unavailable}", offer to take a message.`,
+        `Searching for a technician now. ${whileSearching}` +
+        `You stay on the call. When you hear "${ANNOUNCEMENTS.joined}", a technician is talking with the resident: say nothing at all from then on, do not introduce anyone and do not answer, even if spoken to. ` +
+        `If you hear "${ANNOUNCEMENTS.unavailable}", the resident can hear you again: apologise and offer to take a message.`,
     });
     setImmediate(() => startSearch(t));
+    // Give Ava time to say "please hold" before the music replaces her.
+    if (holdDelayMs !== null) setTimeout(() => startHold(t), holdDelayMs).unref();
   });
 
   // ---------------------------------------------------------------- technician legs
@@ -764,12 +914,20 @@ function createApp({ config, client, registerCall, logger = console.log }) {
       } else if (who === 'agent') {
         resident.agent.state = 'in';
         resident.agent.callSid = body.CallSid;
+        resident.agent.muted = false; // a leg always joins unmuted
       } else if (who === 'technician' && t.status === 'bridging') {
         t.status = 'connected';
         t.timings.technician_joined = timing(t, 'technician_joined', `conference=${body.ConferenceSid}`);
         logTimingSummary(t);
         finish(t, 'connected', t.timings.technician_joined);
-        // Everyone hears it, and it is Ava's cue to introduce the resident.
+        // Silence Ava, stop the resident's hold music, then tell the room. In this order
+        // nobody hears Ava react to the announcement and the resident does not miss it.
+        setAgentMuted(residentCallSid, true, 'technician joined').then((muted) => {
+          if (!muted) return;
+          t.agentMutedAt = Date.now();
+          saveReport(t);
+        });
+        endHold(t, 'technician joined');
         announce(residentCallSid, 'joined');
       }
     } else if (event === 'participant-leave') {
@@ -778,6 +936,15 @@ function createApp({ config, client, registerCall, logger = console.log }) {
       log(`CONFERENCE ${who} left ${roomName(residentCallSid)} call=${body.CallSid} (now ${resident.present.size} in the room)`);
 
       if (who === 'agent') resident.agent.state = 'left';
+      if (who === 'technician') {
+        // The resident is alone with Ava again, so she needs her voice back.
+        setAgentMuted(residentCallSid, false, 'technician left').then((unmuted) => {
+          if (unmuted) {
+            t.agentUnmutedAt = Date.now();
+            saveReport(t);
+          }
+        });
+      }
       if (who === 'resident') residentGone(residentCallSid, 'left the room');
       else endIfResidentAlone(residentCallSid);
     } else if (event === 'conference-end') {
@@ -795,12 +962,18 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     res.type('html').send(renderList(all));
   });
 
-  app.get('/reports/:sid', localOnly, (req, res) => {
+  app.get('/reports/:sid', localOnly, wrap(async (req, res) => {
+    if (!reports.get(req.params.sid)) return res.status(404).send('No report for that call SID.');
+    // Opening the page fetches the latest transcript (until it is final), but never
+    // keeps the browser waiting long if ElevenLabs is slow.
+    await Promise.race([
+      refreshTranscript(req.params.sid),
+      new Promise((resolve) => { setTimeout(resolve, 9000).unref(); }),
+    ]);
     const report = reports.get(req.params.sid);
-    if (!report) return res.status(404).send('No report for that call SID.');
     if (req.query.format === 'json') return res.json(report);
     res.type('html').send(renderDetail(report));
-  });
+  }));
 
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {

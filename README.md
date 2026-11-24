@@ -13,11 +13,11 @@ The resident, Ava and the technician all sit in one Twilio conference room, `roo
 
 1. The resident's call goes straight into the room.
 2. The server adds Ava to the room as her own call leg. Twilio reaches that leg through a TwiML App whose Voice URL is `/twilio/agent-leg`, and that endpoint returns the ElevenLabs register-call TwiML. The resident hears a second or two of silence, then Ava.
-3. Ava calls the `request_transfer` tool with a `summary` and the resident's `call_sid`. The server answers straight away (`"status": "searching"`) and calls technicians in the background. Ava keeps talking with the resident.
+3. Ava calls the `request_transfer` tool with a `summary` and the resident's `call_sid`. The server answers straight away (`"status": "searching"`) and calls technicians in the background. Ava asks the resident to hold, and about 5 seconds after the tool call the resident is put on **hold music** and Ava is muted. See [Hold music](#hold-music).
 4. A technician who picks up hears the summary and "Press 1 to connect to the resident." (up to 3 times). Answering-machine detection runs in the background.
 5. The first technician to press 1 wins. Every other technician call is ended at once. The winner hears "Connecting you to the resident." and joins the same room.
-6. Everyone hears "A technician has joined the call." That is Ava's cue to introduce the resident and the issue. **Nobody is moved, so Ava's conversation carries on** and she remembers everything said before.
-7. If every technician fails, everyone hears "No technician is available right now." and Ava, still on the call, offers to take a message.
+6. The server stops the hold music and makes sure Ava is muted, then everyone hears "A technician has joined the call." From here the resident and the technician talk to each other and **Ava says nothing**: she stays on the call and keeps listening, but nobody can hear her. Nobody is moved, so her conversation carries on and she remembers everything said before. If the technician hangs up, Ava is unmuted and the resident is talking to her again.
+7. If every technician fails, the music stops, Ava is unmuted, everyone hears "No technician is available right now." and Ava, still on the call, offers to take a message.
 
 Who can end the call:
 
@@ -96,13 +96,13 @@ Run the same command again whenever `PUBLIC_BASE_URL` changes; it then updates t
 
 **Prompt.** Ava now hears the resident and the technician as one audio stream and cannot tell them apart by herself. Add something like this to her system prompt and adjust it to taste:
 
-> When the resident needs a technician, call `request_transfer` with a short summary. When it returns "searching", tell the resident you are finding a technician and keep talking with them. You stay on the call.
+> When the resident needs a technician, call `request_transfer` with a short summary. When it returns "searching", say one short sentence such as "Please hold for a moment while I connect you with a technician", then say nothing more. Hold music starts for the resident a few seconds later and they cannot hear you while it plays. You stay on the call.
 >
-> When you hear "A technician has joined the call", a technician is now on the line with you and the resident. Greet the technician, introduce the resident by name and summarise the issue in one or two sentences. After that, let the two of them talk: stay silent unless someone addresses you by name or asks you something.
+> When you hear "A technician has joined the call", a technician is now talking with the resident. From that moment say nothing at all: do not greet the technician, do not introduce anyone, and do not answer even if someone speaks to you. Stay silent until the technician has left.
 >
 > When you hear "No technician is available right now", apologise and offer to take a message.
 
-Two ElevenLabs system tools make this work better: **Skip turn**, so Ava can stay silent while the two humans talk, and **End call**, if you want Ava to say goodbye and leave after the introduction (the resident and technician stay connected).
+Ava's silence does not depend on this prompt. The server mutes her call leg while the technician is in the room, so nobody hears her even if the model produces a reply. The prompt, together with the ElevenLabs **Skip turn** system tool, only stops her from generating replies into the void (they would show up in the transcript marked "muted, not heard").
 
 **First-message override (optional here).** It is only used in one rare case: Ava's leg dropped during the search and no technician was found, so she is brought back with "Sorry, no technician is available right now. Can I take a message?" For that to work, enable overrides for **First message** in the agent's **Security** settings.
 
@@ -181,7 +181,34 @@ Each record holds the resident's number and call SID, the summary, the dial mode
 | `failed` | Twilio could not place the call (the reason is in `detail`) |
 | `not-called` | Never dialled, because the search ended first (sequential mode) |
 
-The report pages are only served to `localhost`, not through the ngrok URL, because they contain phone numbers and call summaries.
+The report pages are only served to `localhost`, not through the ngrok URL, because they contain phone numbers, call summaries and transcripts.
+
+### Call transcript
+
+The detail page of each report has a **Transcript** section: what Ava and the caller side said, in time order, with the key moments of the transfer placed in between ("Ava asked for a technician", "Technician ... joined the call"). The list page shows how many lines each transcript has.
+
+- The transcript comes from ElevenLabs, which transcribes every conversation Ava has. The server looks the conversation up by the resident's call SID (the `call_sid` dynamic variable), so no extra setup is needed.
+- It is fetched automatically 5, 20 and 60 seconds after the call ends, and whenever you open the report page until ElevenLabs marks it as finished. Opening the page during a call shows what ElevenLabs has so far.
+- It is saved inside the report's JSON file (`transcript`), so it survives restarts. Old reports get their transcript the first time you open them.
+- Speakers are **Ava** and **Resident**. Ava hears the room as one audio stream, so after the technician joins, the caller-side lines are labelled **Resident or technician**: ElevenLabs cannot tell those two apart.
+- While the technician is on the call Ava is muted. If the model still produced a reply, it appears struck through as **Ava (muted, not heard)**: nobody on the call heard it.
+- Anything said after Ava has left the call is not in the transcript, because nothing is transcribing it. (On `main` that is the whole resident-technician conversation.) The Twilio recording still has the audio.
+- Only calls where Ava asked for a technician have a report, so only those have a transcript here.
+
+## Hold music
+
+While technicians are being called, the resident hears music instead of silence.
+
+- It starts `HOLD_MUSIC_DELAY_SEC` seconds after the tool call (default `5`). The delay is there so Ava can finish saying "please hold" first: once the music starts, the resident cannot hear her. If her sentence gets cut off, raise the number; if there is a gap of silence before the music, lower it.
+- The music is `HOLD_MUSIC_URL`: Twilio's classical hold music by default, or a link to your own `.mp3` or `.wav` file.
+- Ava is muted for the same period, so nothing she says is lost on a resident who cannot hear it.
+- The music stops when a technician joins, or when every technician has failed (Ava is then unmuted and talks to the resident again).
+- Set `HOLD_MUSIC_DELAY_SEC=off` to turn it off. Ava then keeps talking with the resident during the search, as before.
+- The report records `hold_started_at` and `hold_ended_at`, and the transcript shows both moments.
+
+How it is done: the resident is already in a conference with Ava, so the conference's own `waitUrl` music cannot be used (it only plays before a second person joins). Instead the server puts the resident's participant **on hold** with a `holdUrl`, which is Twilio's way of playing music to one person in a running conference.
+
+One thing to check in ElevenLabs: while the resident is on hold, Ava hears silence. If the agent is set to end the call after a period of silence, that could drop her during a long search. She would be brought back with the fallback line if no technician is found, but it is simpler to leave that setting off or longer than your ring time for all technicians.
 
 ## Announcement audio
 
@@ -211,15 +238,16 @@ Run these with real phones. Repeat the starred ones with `DIAL_MODE=parallel`.
 | # | Case | How to test | Expected |
 | --- | --- | --- | --- |
 | 1 | Ava joins | Start a call and answer as the resident | A second or two of silence, then Ava greets you. Log: `AGENT adding Ava`, `REGISTER-CALL ok`, `CONFERENCE agent joined` |
-| 2 | Accept, three-way * | Ask for a technician; technician presses 1 | Technician hears "Connecting you to the resident." Everyone hears "A technician has joined the call." Ava introduces the resident and the issue. All three can hear each other. Log: `WINNER`, `CONFERENCE technician joined ... (now 3 in the room)`, `TRANSFER CONNECTED` |
-| 3 | Ava remembers | After the technician joins, ask Ava something from earlier in the call | She answers from the same conversation |
-| 4 | Technician leaves | Technician hangs up | Resident is still talking to Ava |
+| 2a | Hold music | Ask for a technician | Ava says "please hold", then music plays until a technician joins or the search fails. Log: `HOLD resident=... on hold with music`, `AGENT Ava muted` |
+| 2 | Accept, Ava silent * | Ask for a technician; technician presses 1 | Music stops. Technician hears "Connecting you to the resident." Everyone hears "A technician has joined the call." Resident and technician talk; Ava is not heard, even if you speak to her. Log: `WINNER`, `CONFERENCE technician joined ... (now 3 in the room)`, `AGENT Ava muted`, `TRANSFER CONNECTED` |
+| 3 | Technician leaves, Ava remembers | Technician hangs up, then ask Ava something from earlier in the call | Log: `AGENT Ava unmuted`. She answers, from the same conversation |
+| 4 | Transcript | Open the report after the call | The resident-technician conversation is there; anything Ava produced while muted is struck through and marked "muted, not heard" |
 | 5 | Ava leaves | Have Ava end her conversation while the technician is on | Resident and technician stay connected |
 | 6 | Resident leaves | Resident hangs up | Call ends for the technician and Ava |
 | 7 | Decline | Technician 1 presses 2 (or hangs up) | Log: `-> declined`. Sequential: technician 2 rings. Resident is still with Ava |
 | 8 | No answer | Let technician 1 ring out (about 20s) | Log: `-> no-answer`, then technician 2 is dialled |
 | 9 | Voicemail * | Let technician 1's voicemail pick up | Log: `AnsweredBy=machine_start`, `-> voicemail`, `CANCEL ... sent status=completed` |
-| 10 | All fail | Every technician declines or does not answer | Everyone hears "No technician is available right now." Ava offers to take a message, in the same conversation. Log: `TRANSFER NO TECHNICIAN`, `ANNOUNCE` |
+| 10 | All fail | Every technician declines or does not answer | Music stops. Everyone hears "No technician is available right now." Ava offers to take a message, in the same conversation. Log: `TRANSFER NO TECHNICIAN`, `ANNOUNCE` |
 | 11 | Resident hangs up while waiting | Resident hangs up while a technician phone is ringing | Log: `RESIDENT gone`, `CANCEL ... (resident hung up)`, `TRANSFER RESIDENT HUNG UP`. The technician phone stops ringing |
 | 12 | Race (parallel only) * | Two technicians answer, both press 1 | Exactly one `WINNER`. The other hears "Another technician has already taken this call." |
 
@@ -233,14 +261,15 @@ npm test
 
 That checks the server's decisions. It does not prove behaviour on a real call; see the next section.
 
-## Not yet proven on a real call
+## What has and has not been checked on real calls
 
-This branch was built from Twilio's API documentation and checked only in simulation. These are the points to watch on the first real call:
+A real call on this branch has connected: Ava joined the room through the TwiML App, called the tool, and a technician joined (the saved report shows `connected`). The points below still depend on listening to a call rather than reading a report:
 
-- **Ava's leg.** Adding a TwiML App to a conference (`to: "app:<APP_SID>"`) is documented by Twilio, but it has not been run here with an ElevenLabs stream on the other end. If Ava never speaks, look for `ERROR could not add Ava` or `ERROR /twilio/agent-leg` in the log.
-- **Which resident the leg is for.** The server passes the resident's call SID to the TwiML App as a custom parameter. If Twilio delivers it under a different name, the server falls back to "the one call currently waiting for Ava", which is right as long as calls do not start at the same instant.
-- **Response delay.** Ava's audio now passes through the conference mixer and an extra call leg, so her replies will be somewhat slower than on `main`, for the whole call.
-- **Ava's behaviour in a three-way call.** She reacts to whatever she hears from either person. How well she stays quiet, and whether she picks up the announcement cue, depends on the prompt.
+- **Response delay.** Ava's audio passes through the conference mixer and an extra call leg, so her replies will be somewhat slower than on `main`, for the whole call.
+- **Muting on a real call.** The mute is sent the moment Twilio reports the technician in the room, which takes a fraction of a second. If Ava happens to be mid-sentence she is cut off, and a syllable may get through before the mute lands. Check the log for `AGENT Ava muted` and listen on the first call.
+- **What Ava does while muted.** She still hears both people and may keep generating replies that nobody hears. They cost ElevenLabs usage and clutter the transcript; the prompt and the Skip turn tool reduce this.
+- **Which resident the leg is for.** The server passes the resident's call SID to the TwiML App as a custom parameter. If Twilio does not deliver it, the server falls back to "the one call currently waiting for Ava", which is right as long as two calls do not start at the same instant.
+- **If Ava never speaks**, look for `ERROR could not add Ava` or `ERROR /twilio/agent-leg` in the log.
 
 ## Trial accounts and Geo Permissions
 

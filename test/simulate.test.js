@@ -28,7 +28,8 @@ const FORGED = 'bm90LWEtcmVhbC1zaWduYXR1cmU=';
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
-async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '+15550000002'] } = {}) {
+// holdDelayMs: null = no hold music (most tests), a number = music starts that long after the tool call.
+async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const agentLegs = []; //      conferences(sid).participants.create(...) -> Ava joining
@@ -37,8 +38,20 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
   const logs = [];
   const failUpdatesFor = new Set(); //   call SIDs whose REST updates throw
   const answeredMeanwhile = new Set(); // call SIDs that report in-progress when we try to cancel them
-  const flags = { failAgentAdd: false, failRegister: false };
+  const mutes = []; //          conferences(sid).participants(callSid).update(...) -> muting Ava
+  const holds = []; //          same call with "hold" -> the resident's hold music
+  const roomActions = []; //    mutes, announcements and room endings, in the order they were sent
+  const flags = { failAgentAdd: false, failRegister: false, failConversations: false, failMute: false };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-transfer-test-'));
+  // Stand-in for the ElevenLabs conversations API: what it would return for a call.
+  const elevenLabs = { details: [], lookups: [] };
+  const conversations = {
+    forCall: async (callSid, startedAfterUnix) => {
+      elevenLabs.lookups.push({ callSid, startedAfterUnix });
+      if (flags.failConversations) throw new Error('ElevenLabs HTTP 500: upstream error');
+      return elevenLabs.details;
+    },
+  };
 
   const calls = (sid) => ({
     update: async (options) => {
@@ -56,20 +69,37 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
     return { sid, status: 'queued' };
   };
 
-  const conferences = (sid) => ({
-    update: async (options) => {
-      roomUpdates.push({ sid, ...options });
-      return { sid };
-    },
-    participants: {
-      create: async (options) => {
-        if (flags.failAgentAdd) throw Object.assign(new Error('Application not found'), { code: 21218 });
-        const callSid = `CA${'e'.repeat(31)}${agentLegs.length + 1}`;
-        agentLegs.push({ conferenceSid: sid, callSid, ...options });
-        return { callSid, label: options.label };
+  const conferences = (sid) => {
+    // conferences(sid).participants(callSid).update(...) mutes or unmutes one participant.
+    // ...and with "hold" it puts one participant on hold music or takes them off it.
+    const participants = (callSid) => ({
+      update: async (options) => {
+        if ('hold' in options) {
+          roomActions.push(`hold:${options.hold}`);
+          holds.push({ conferenceSid: sid, callSid, ...options });
+          return { callSid, hold: options.hold };
+        }
+        roomActions.push(`mute:${options.muted}`);
+        mutes.push({ conferenceSid: sid, callSid, ...options });
+        if (flags.failMute) throw Object.assign(new Error('Participant not found'), { code: 20404 });
+        return { callSid, muted: options.muted };
       },
-    },
-  });
+    });
+    participants.create = async (options) => {
+      if (flags.failAgentAdd) throw Object.assign(new Error('Application not found'), { code: 21218 });
+      const callSid = `CA${'e'.repeat(31)}${agentLegs.length + 1}`;
+      agentLegs.push({ conferenceSid: sid, callSid, ...options });
+      return { callSid, label: options.label };
+    };
+    return {
+      update: async (options) => {
+        roomActions.push(options.announceUrl ? `announce:${new URL(options.announceUrl).searchParams.get('kind')}` : `room:${options.status}`);
+        roomUpdates.push({ sid, ...options });
+        return { sid };
+      },
+      participants,
+    };
+  };
 
   const config = {
     publicBaseUrl: PUBLIC,
@@ -80,6 +110,9 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
     dialMode,
     ringTimeoutSec: 20,
     agentAppSid: APP_SID,
+    holdDelayMs,
+    holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
+    transcriptRetryMs: [5],
     reportsDir: path.join(tmp, 'reports'),
     publicDir: path.join(tmp, 'public'),
   };
@@ -89,7 +122,7 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
     return AGENT_TWIML;
   };
 
-  const { app, state } = createApp({ config, client: { calls, conferences }, registerCall, logger: (line) => logs.push(line) });
+  const { app, state } = createApp({ config, client: { calls, conferences }, registerCall, conversations, logger: (line) => logs.push(line) });
   const server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -195,7 +228,7 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
   };
 
   return {
-    config, state, created, updates, agentLegs, roomUpdates, registered, logs, failUpdatesFor, answeredMeanwhile, flags,
+    config, state, created, updates, agentLegs, roomUpdates, mutes, holds, roomActions, registered, logs, failUpdatesFor, answeredMeanwhile, flags, elevenLabs,
     hook, json, get, room, avaJoins, avaLeaves, residentIsWithAva, residentAsksForTransfer, tech, techAcceptsAndJoins,
     techCalls, endedWith, announcements, roomEnded, transfer, outcomes, report, close,
   };
@@ -310,7 +343,7 @@ test('accept: the technician joins the same room, nobody is moved, and Ava is st
   const reply = await s.residentAsksForTransfer();
   assert.equal(reply.status, 200);
   assert.equal(reply.body.status, 'searching');
-  assert.match(reply.body.message, /A technician has joined the call\./, 'the tool reply tells Ava what to listen for');
+  assert.match(reply.body.message, /When you hear "A technician has joined the call\.".*say nothing at all/, 'the tool reply tells Ava to go silent');
 
   // Sequential: only the first technician is dialled, with async AMD, 20s timeout and status callbacks.
   assert.equal(s.techCalls().length, 1);
@@ -345,9 +378,12 @@ test('accept: the technician joins the same room, nobody is moved, and Ava is st
   assert.equal(s.roomEnded(), false);
   assert.equal(s.registered.length, 1, 'no second ElevenLabs conversation');
 
-  // Everyone hears that the technician has arrived (this is Ava's cue).
-  assert.deepEqual(s.announcements(), ['joined']);
+  // Ava is silenced first, then the room is told the technician has arrived.
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined']);
+  assert.deepEqual(s.mutes, [{ conferenceSid: CONFERENCE, callSid: s.agentLegs[0].callSid, muted: true }], "it is Ava's leg that is muted");
+  assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, true);
   assert.equal(s.roomUpdates[0].sid, CONFERENCE);
+  assert.ok(s.logs.some((line) => line.includes('AGENT Ava muted')));
   assert.equal(s.techCalls().length, 1, 'second technician is never dialled');
 
   const logText = s.logs.join('\n');
@@ -365,6 +401,8 @@ test('accept: the technician joins the same room, nobody is moved, and Ava is st
   assert.equal(report.result, 'connected');
   assert.equal(report.connected_technician, '+15550000001');
   assert.equal(typeof report.resident_wait_seconds, 'number');
+  assert.ok(report.agent_muted_at, 'the report records when Ava was muted');
+  assert.equal(report.agent_unmuted_at, null);
   const [first, second] = report.technicians;
   assert.equal(first.outcome, 'accepted');
   assert.equal(first.answered_by, 'human');
@@ -400,15 +438,116 @@ test('after connecting: the call survives the technician or Ava leaving, and end
   await s.residentAsksForTransfer();
   await s.techAcceptsAndJoins(0);
 
-  // Technician hangs up: the resident is still with Ava.
+  // Technician hangs up: the resident is still with Ava, who gets her voice back.
   await s.tech(0).leaves();
   assert.equal(s.roomEnded(), false);
   assert.equal(s.state.residentCalls.get(RESIDENT).present.size, 2);
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined', 'mute:false']);
+  assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, false);
+  assert.ok(s.report().agent_unmuted_at);
 
   // Then Ava's conversation ends too: nobody is left for the resident to talk to.
   await s.avaLeaves();
   assert.equal(s.roomEnded(), true);
   assert.equal(s.roomUpdates.at(-1).sid, CONFERENCE);
+});
+
+test('muting: if Twilio refuses the mute it is logged and the room is still told; no mute is attempted when Ava is not there', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  s.flags.failMute = true;
+  await s.techAcceptsAndJoins(0);
+
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined']);
+  assert.ok(s.logs.some((line) => line.includes('ERROR could not mute Ava') && line.includes('Twilio error 20404')));
+  assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, false);
+  assert.equal(s.report().agent_muted_at, null, 'the report does not claim she was muted');
+
+  const other = await setup();
+  t.after(other.close);
+  await other.residentAsksForTransfer();
+  await other.avaLeaves();
+  await other.techAcceptsAndJoins(0);
+  assert.deepEqual(other.roomActions, ['announce:joined']);
+});
+
+// ---------------------------------------------------------------- hold music
+
+test('hold music: shortly after the tool call the resident hears music and Ava is muted; both end when the technician joins', async (t) => {
+  const s = await setup({ holdDelayMs: 10 });
+  t.after(s.close);
+
+  const reply = await s.residentAsksForTransfer();
+  assert.match(reply.body.message, /asking the resident to hold/, 'Ava is told to say "please hold" first');
+  await tick();
+
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true']);
+  assert.deepEqual(s.holds[0], {
+    conferenceSid: CONFERENCE,
+    callSid: RESIDENT,
+    hold: true,
+    holdUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
+    holdMethod: 'GET',
+  });
+  assert.equal(s.mutes[0].callSid, s.agentLegs[0].callSid);
+  assert.ok(s.report().hold_started_at);
+  assert.ok(s.report().agent_muted_at);
+  assert.ok(s.logs.some((line) => line.includes('HOLD') && line.includes('on hold with music')));
+
+  await s.techAcceptsAndJoins(0);
+  // Music off first, then the announcement, so the resident hears it. Ava stays muted.
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'hold:false', 'announce:joined']);
+  assert.deepEqual(s.holds[1], { conferenceSid: CONFERENCE, callSid: RESIDENT, hold: false });
+  assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, true);
+  const report = s.report();
+  assert.ok(report.hold_ended_at >= report.hold_started_at);
+  assert.equal(report.agent_unmuted_at, null);
+});
+
+test('hold music: when nobody is available the music stops and Ava gets her voice back before the announcement', async (t) => {
+  const s = await setup({ holdDelayMs: 10 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await tick();
+
+  await s.tech(0).status('busy');
+  await tick();
+  await s.tech(1).status('no-answer');
+  await tick();
+
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'hold:false', 'mute:false', 'announce:unavailable']);
+  const report = s.report();
+  assert.equal(report.result, 'no technician');
+  assert.ok(report.hold_ended_at);
+  assert.ok(report.agent_unmuted_at);
+});
+
+test('hold music: not started if the search is already over, and can be switched off', async (t) => {
+  // Resident hangs up before the music would have started.
+  const gone = await setup({ holdDelayMs: 60 });
+  t.after(gone.close);
+  await gone.residentAsksForTransfer();
+  await gone.room('participant-leave', { CallSid: RESIDENT });
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.deepEqual(gone.holds, []);
+
+  // A technician accepted before the music would have started.
+  const quick = await setup({ holdDelayMs: 150 });
+  t.after(quick.close);
+  await quick.residentAsksForTransfer();
+  await quick.techAcceptsAndJoins(0);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.deepEqual(quick.holds, []);
+  assert.deepEqual(quick.roomActions, ['mute:true', 'announce:joined']);
+
+  // HOLD_MUSIC_DELAY_SEC=off
+  const off = await setup({ holdDelayMs: null });
+  t.after(off.close);
+  const reply = await off.residentAsksForTransfer();
+  assert.match(reply.body.message, /keep talking with them/);
+  await tick();
+  assert.deepEqual(off.roomActions, []);
 });
 
 test('after connecting: Ava can drop out and the resident and technician carry on', async (t) => {
@@ -759,6 +898,135 @@ test('reports: summary text is HTML-escaped', async (t) => {
   const detail = await s.get(`/reports/${RESIDENT}`);
   assert.ok(!detail.text.includes('<script>alert(1)</script>'));
   assert.ok(detail.text.includes('&lt;script&gt;alert(1)&lt;/script&gt; &amp; more'));
+});
+
+// ---------------------------------------------------------------- transcripts
+
+// An ElevenLabs conversation that began 30 seconds before the tool call.
+function conversationFor(report, { status = 'done', turns } = {}) {
+  const start = Math.floor(Date.parse(report.started_at) / 1000) - 30;
+  return {
+    conversation_id: 'conv_test1',
+    status,
+    metadata: { start_time_unix_secs: start, call_duration_secs: 60 },
+    analysis: { transcript_summary: 'Resident reported a leak and was connected to a technician.' },
+    conversation_initiation_client_data: { dynamic_variables: { call_sid: RESIDENT } },
+    transcript: turns || [
+      { role: 'agent', time_in_call_secs: 2, message: 'Hello, this is Ava. How can I help?' },
+      { role: 'user', time_in_call_secs: 10, message: 'My kitchen sink is leaking.' },
+      { role: 'agent', time_in_call_secs: 27, message: 'Let me find a technician for you.', tool_calls: [{ tool_name: 'request_transfer' }] },
+      { role: 'user', time_in_call_secs: 45, message: 'Hi, this is Kofi from maintenance.', interrupted: true },
+      { role: 'agent', time_in_call_secs: 50, message: 'Kofi, I have Kennedy from unit 4B on the line.' },
+    ],
+  };
+}
+
+test('transcript: fetched from ElevenLabs after the call and shown on the report with speakers and key moments', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.techAcceptsAndJoins(0);
+  assert.equal(s.report().transcript, null, 'nothing is fetched while the call is running');
+
+  s.elevenLabs.details = [conversationFor(s.report())];
+  await s.room('participant-leave', { CallSid: RESIDENT });
+  await s.room('conference-end');
+  await tick();
+
+  assert.deepEqual(s.elevenLabs.lookups.map((l) => l.callSid), [RESIDENT], 'looked up by the resident call SID');
+  const transcript = s.report().transcript;
+  assert.equal(transcript.status, 'final');
+  assert.equal(transcript.conversations[0].conversation_id, 'conv_test1');
+  assert.equal(transcript.conversations[0].entries.length, 6, '5 spoken lines and 1 tool call');
+  assert.ok(s.logs.some((line) => line.includes('TRANSCRIPT') && line.includes('final')));
+
+  const detail = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(detail.includes('<h2>Transcript</h2>'));
+  assert.ok(detail.includes('ElevenLabs summary:</strong> Resident reported a leak'));
+  const order = [
+    'My kitchen sink is leaking.',
+    'called request_transfer',
+    'Ava asked for a technician (request_transfer)',
+    'Technician +15550000001 joined the call',
+    'Ava muted: she keeps listening but nobody hears her',
+    'Hi, this is Kofi from maintenance.',
+    'Kofi, I have Kennedy from unit 4B on the line.',
+  ].map((text) => detail.indexOf(text));
+  assert.ok(order.every((index) => index > 0), 'every line and marker is on the page');
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'lines and key moments are in time order');
+
+  // Before the technician joins the caller side is the resident; afterwards it could be either person.
+  assert.match(detail, /<td>Resident<\/td><td class="text">My kitchen sink is leaking\.<\/td>/);
+  assert.match(detail, /<td>Resident or technician<\/td><td class="text">Hi, this is Kofi from maintenance\. <em>\(interrupted\)<\/em><\/td>/);
+  assert.match(detail, /<td>Ava<\/td><td class="text">Hello, this is Ava\. How can I help\?<\/td>/);
+  // Whatever the model produced after she was muted was never heard on the call.
+  assert.match(detail, /<tr class="agent unheard"><td>[^<]*<\/td><td>Ava \(muted, not heard\)<\/td><td class="text">Kofi, I have Kennedy from unit 4B on the line\.<\/td>/);
+
+  assert.ok((await s.get('/reports')).text.includes('5 lines'));
+  assert.equal(s.elevenLabs.lookups.length, 1, 'a final transcript is not fetched again');
+});
+
+test('transcript: opening the report during the call shows what there is so far and refreshes on reload', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+
+  s.elevenLabs.details = [conversationFor(s.report(), {
+    status: 'in-progress',
+    turns: [{ role: 'agent', time_in_call_secs: 2, message: 'Hello, this is Ava.' }],
+  })];
+  const during = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(during.includes('Hello, this is Ava.'));
+  assert.ok(during.includes('still in progress'));
+  assert.equal(s.report().transcript.status, 'partial');
+
+  s.elevenLabs.details = [conversationFor(s.report())];
+  const after = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(after.includes('My kitchen sink is leaking.'));
+  assert.ok(!after.includes('still in progress'));
+  assert.equal(s.elevenLabs.lookups.length, 2);
+});
+
+test('transcript: nothing found yet, and an ElevenLabs error, are both explained on the page', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+
+  assert.ok((await s.get(`/reports/${RESIDENT}`)).text.includes('ElevenLabs has no conversation for this call yet'));
+  assert.equal(s.report().transcript.status, 'pending');
+
+  s.elevenLabs.details = [conversationFor(s.report(), { status: 'in-progress' })];
+  await s.get(`/reports/${RESIDENT}`);
+  s.flags.failConversations = true;
+  const failed = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(failed.includes('Could not fetch the transcript from ElevenLabs: ElevenLabs HTTP 500'));
+  assert.ok(failed.includes('My kitchen sink is leaking.'), 'lines fetched earlier are kept');
+  assert.equal(s.report().transcript.status, 'unavailable');
+});
+
+test('transcript: still fetched for an old report after the server has restarted, and text is HTML-escaped', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.techAcceptsAndJoins(0);
+  const saved = s.report();
+
+  // A fresh server with the same reports folder and no memory of the call.
+  const details = [conversationFor(saved, { turns: [{ role: 'user', time_in_call_secs: 5, message: '<b>water</b> & more' }] })];
+  const restarted = createApp({ config: s.config, client: {}, registerCall: async () => '', conversations: { forCall: async () => details }, logger: () => {} });
+  const server = await new Promise((resolve) => {
+    const listening = restarted.app.listen(0, () => resolve(listening));
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const page = await (await fetch(`http://localhost:${server.address().port}/reports/${RESIDENT}`)).text();
+  assert.ok(page.includes('&lt;b&gt;water&lt;/b&gt; &amp; more'));
+  assert.ok(!page.includes('<b>water</b>'));
+
+  const onDisk = s.report();
+  assert.equal(onDisk.transcript.status, 'final');
+  assert.equal(onDisk.result, 'connected', 'the rest of the saved report is untouched');
+  assert.equal(onDisk.connected_technician, saved.connected_technician);
 });
 
 test('security: bad Twilio signature is 403, tool endpoint needs X-Tool-Secret and not a Twilio signature', async (t) => {
