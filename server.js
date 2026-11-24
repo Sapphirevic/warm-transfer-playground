@@ -24,6 +24,7 @@ app.listen(config.port, () => {
   console.log(`  dial mode   : ${config.dialMode}`);
   console.log(`  technicians : ${config.techNumbers.join(', ')}`);
   console.log(`  ring timeout: ${config.ringTimeoutSec}s`);
+  console.log(`  transfer    : agent stays on the call (Ava leg via TwiML App ${config.agentAppSid})`);
   console.log(`  reports     : http://localhost:${config.port}/reports`);
   console.log('Start a test call with:  node scripts/start-call.js +15551234567');
 });

@@ -9,6 +9,7 @@
     "dev": "node --watch server.js",
     "call": "node scripts/start-call.js",
     "tunnel": "node scripts/tunnel.js",
+    "setup-agent-app": "node scripts/setup-agent-app.js",
     "test": "node --test"
   },
   "engines": {

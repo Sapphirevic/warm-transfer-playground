@@ -1,5 +1,11 @@
 'use strict';
 
+// Branch "agent-stays-on-call": the resident, Ava and the technician share one
+// Twilio conference. The resident is in the room from the first second, Ava is
+// added to it as her own call leg (a TwiML App that returns the ElevenLabs
+// register-call TwiML), and a technician who presses 1 simply joins the same room.
+// Nobody is moved, so Ava's conversation carries on while the technician is there.
+
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -14,12 +20,17 @@ const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
 const CALL_ENDED = new Set(['completed', 'busy', 'no-answer', 'failed', 'canceled']);
 const MAX_PROMPTS = 3;
 const FALLBACK_FIRST_MESSAGE = 'Sorry, no technician is available right now. Can I take a message?';
-const RESIDENT_ANNOUNCEMENT = 'A technician has answered. Connecting you now.';
 const TECH_ANNOUNCEMENT = 'Connecting you to the resident.';
+// Spoken into the room for everyone. Ava hears them like anything else said on the
+// call, so her prompt can react to these exact phrases.
+const ANNOUNCEMENTS = {
+  joined: 'A technician has joined the call.',
+  unavailable: 'No technician is available right now.',
+};
 const LOGGED_FIELDS = [
   'CallSid', 'ParentCallSid', 'CallStatus', 'Direction', 'From', 'To', 'AnsweredBy', 'MachineDetectionDuration',
-  'Digits', 'StatusCallbackEvent', 'ConferenceSid', 'FriendlyName', 'RecordingSid', 'RecordingStatus',
-  'CallDuration', 'SipResponseCode',
+  'Digits', 'StatusCallbackEvent', 'ConferenceSid', 'FriendlyName', 'ParticipantLabel', 'RecordingSid',
+  'RecordingStatus', 'CallDuration', 'SipResponseCode',
 ];
 
 const secs = (from, to) => `${((to - from) / 1000).toFixed(1)}s`;
@@ -42,7 +53,7 @@ function createApp({ config, client, registerCall, logger = console.log }) {
   const base = config.publicBaseUrl;
   const reports = createReportStore(config.reportsDir);
   const connectingFile = path.join(config.publicDir, 'connecting.mp3');
-  const residentCalls = new Map(); // resident CallSid -> { direction, number, ended }
+  const residentCalls = new Map(); // resident CallSid -> call record (see newResidentCall)
   const transfers = new Map(); //     resident CallSid -> transfer (see /tool/request-transfer)
 
   const log = (message) => logger(`${new Date().toISOString()} ${message}`);
@@ -98,6 +109,8 @@ function createApp({ config, client, registerCall, logger = console.log }) {
 
   // ---------------------------------------------------------------- helpers
 
+  const twilioError = (err) => `${err.code ? `Twilio error ${err.code}: ` : ''}${err.message}`;
+
   function timing(t, event, detail = '') {
     const now = Date.now();
     log(`TIMING resident=${t.residentCallSid} ${event} +${secs(t.startedAt, now)} after tool call${detail ? ` ${detail}` : ''}`);
@@ -112,11 +125,11 @@ function createApp({ config, client, registerCall, logger = console.log }) {
       ['first_tech_ringing', t.timings.first_tech_ringing],
       ['tech_answered', winner.answeredAt],
       ['tech_pressed_1', winner.pressedAt],
-      ['resident_joined', t.timings.resident_joined],
+      ['technician_joined', t.timings.technician_joined],
     ].map(([name, at]) => `  ${name.padEnd(19)} ${at ? `${new Date(at).toISOString()}  +${secs(start, at)}` : '(not seen)'}`);
     log(
       `TIMING SUMMARY resident=${t.residentCallSid} winner=tech#${t.winner} ${winner.number}\n${rows.join('\n')}\n` +
-        `  => resident waited ${secs(start, t.timings.resident_joined)} from tool call to joining the technician`
+        `  => resident waited ${secs(start, t.timings.technician_joined)} from tool call to the technician joining`
     );
   }
 
@@ -146,20 +159,34 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     );
   }
 
-  // Both legs get the same room settings. Either side leaving ends the conference
-  // (endConferenceOnExit), and whoever is first hears the hold audio from waitUrl.
-  function conferenceTwiml(residentCallSid, { say, play } = {}) {
+  function newResidentCall({ direction, number, twilioNumber }) {
+    return {
+      direction,
+      number,
+      twilioNumber,
+      ended: false,
+      conferenceSid: null,
+      present: new Set(), // call SIDs in the room right now
+      // state: none -> joining -> in -> left
+      agent: { state: 'none', callSid: null, joins: 0, firstMessage: null },
+    };
+  }
+
+  // The shared room. Only the resident ends it by leaving: if the technician hangs up
+  // the resident is still with Ava, and if Ava drops the resident and technician carry on.
+  function conferenceTwiml(residentCallSid, { say, endConferenceOnExit }) {
     const callback = `${base}/conference/status?resident=${residentCallSid}`;
     const vr = new VoiceResponse();
-    if (play) vr.play(play);
-    else if (say) vr.say(say);
+    if (say) vr.say(say);
     vr.dial().conference(
       {
         startConferenceOnEnter: true,
-        endConferenceOnExit: true,
+        endConferenceOnExit,
         beep: false,
-        waitUrl: config.holdMusicUrl,
-        waitMethod: 'GET',
+        // Silence instead of hold music for the second or two before Ava joins.
+        waitUrl: '',
+        // Ava's replies now pass through the conference mixer, so keep its buffering low.
+        jitterBufferSize: 'small',
         record: 'record-from-start',
         recordingStatusCallback: callback,
         recordingStatusCallbackMethod: 'POST',
@@ -180,7 +207,97 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     sendTwiml(res, vr);
   }
 
-  const twilioError = (err) => `${err.code ? `Twilio error ${err.code}: ` : ''}${err.message}`;
+  // ---------------------------------------------------------------- Ava's leg
+
+  // Adds Ava to the resident's room as a separate call leg. Twilio "calls" our TwiML
+  // App, which asks /twilio/agent-leg for TwiML, and that returns the ElevenLabs stream.
+  async function addAgent(residentCallSid, { firstMessage = null } = {}) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || resident.ended || !resident.conferenceSid) return;
+    const { agent } = resident;
+    if (agent.state === 'joining' || agent.state === 'in') return;
+
+    agent.state = 'joining';
+    agent.firstMessage = firstMessage;
+    agent.joins += 1;
+    try {
+      const participant = await client.conferences(resident.conferenceSid).participants.create({
+        from: config.twilioPhoneNumber,
+        to: `app:${config.agentAppSid}?resident=${residentCallSid}`,
+        label: `ava-${agent.joins}`,
+        beep: 'false',
+        startConferenceOnEnter: true,
+        endConferenceOnExit: false,
+        jitterBufferSize: 'off',
+      });
+      if (!agent.callSid) agent.callSid = participant.callSid;
+      log(`AGENT adding Ava to ${roomName(residentCallSid)} leg=${participant.callSid}${firstMessage ? ' with first-message override' : ''}`);
+    } catch (err) {
+      agent.state = 'none';
+      log(`ERROR could not add Ava to the call resident=${residentCallSid}: ${twilioError(err)}`);
+      const vr = new VoiceResponse();
+      vr.say('Sorry, we are having trouble connecting you right now. Please try again later.');
+      vr.hangup();
+      client.calls(residentCallSid).update({ twiml: vr.toString() }).catch(() => {});
+    }
+  }
+
+  // Which resident call is this Ava leg for? Normally the custom parameter says so.
+  function residentForAgentLeg(body) {
+    const named = body.resident || body.Param_resident;
+    if (named && residentCalls.has(named)) return named;
+    // Fallback if Twilio did not pass the parameter through: the one call waiting for Ava.
+    const waiting = [...residentCalls].filter(([, call]) => !call.ended && call.agent.state === 'joining');
+    return waiting.length === 1 ? waiting[0][0] : null;
+  }
+
+  // Voice URL of the TwiML App. Returns the ElevenLabs <Connect><Stream> for Ava's leg.
+  app.post('/twilio/agent-leg', twilioHook, wrap(async (req, res) => {
+    const residentCallSid = residentForAgentLeg(req.body);
+    const resident = residentCallSid && residentCalls.get(residentCallSid);
+    if (!resident) {
+      log('ERROR /twilio/agent-leg could not tell which resident call this is for');
+      return sayAndHangup(res);
+    }
+    const outbound = resident.direction === 'outbound';
+    const { firstMessage } = resident.agent;
+    try {
+      const xml = await registerCall({
+        fromNumber: outbound ? resident.twilioNumber : resident.number,
+        toNumber: outbound ? resident.number : resident.twilioNumber,
+        direction: resident.direction,
+        // Ava's {{call_sid}} is the resident's call, which is what request_transfer needs.
+        callSid: residentCallSid,
+        firstMessage,
+      });
+      log(`REGISTER-CALL ok resident=${residentCallSid} direction=${resident.direction}${firstMessage ? ' with first-message override' : ''}`);
+      res.type('text/xml').send(xml);
+    } catch (err) {
+      log(`ERROR register-call failed resident=${residentCallSid}: ${err.message}`);
+      // Spoken on Ava's leg, so the resident hears it in the room.
+      sayAndHangup(res, 'Sorry, we are having trouble connecting you right now. Please try again later.');
+    }
+  }));
+
+  // Plays a short line (or public/connecting.mp3) to everyone in the room.
+  function announce(residentCallSid, kind) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || !resident.conferenceSid) return;
+    client.conferences(resident.conferenceSid)
+      .update({ announceUrl: `${base}/conference/announce?kind=${kind}`, announceMethod: 'POST' })
+      .then(() => log(`ANNOUNCE "${ANNOUNCEMENTS[kind]}" in ${roomName(residentCallSid)}`))
+      .catch((err) => log(`ERROR could not announce "${kind}" in ${roomName(residentCallSid)}: ${twilioError(err)}`));
+  }
+
+  app.post('/conference/announce', twilioHook, (req, res) => {
+    const kind = req.query.kind;
+    const vr = new VoiceResponse();
+    if (kind === 'joined' && fs.existsSync(connectingFile)) vr.play(`${base}/public/connecting.mp3`);
+    else vr.say(ANNOUNCEMENTS[kind] || ANNOUNCEMENTS.joined);
+    sendTwiml(res, vr);
+  });
+
+  // ---------------------------------------------------------------- technician calls
 
   // Ends one technician call. Twilio needs a different status depending on where the
   // call is: "canceled" for queued/ringing, "completed" for a call that was answered.
@@ -217,8 +334,6 @@ function createApp({ config, client, registerCall, logger = console.log }) {
       endTechCall(t, i, why);
     });
   }
-
-  // ---------------------------------------------------------------- technician search
 
   function startSearch(t) {
     log(`SEARCH start resident=${t.residentCallSid} mode=${config.dialMode} techs=${t.techs.map((x) => x.number).join(',')}`);
@@ -300,57 +415,63 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     }
   }
 
-  async function allFailed(t) {
-    if (t.status !== 'searching') return;
+  // Nobody took it. Ava is normally still in the room, so she is told by an
+  // announcement; if her leg has dropped she is brought back with the fallback line.
+  function noTechnician(t) {
     t.status = 'failed';
-    t.timings.all_failed = timing(t, 'all_technicians_failed', '-> sending resident to /twilio/fallback');
+    t.timings.all_failed = timing(t, 'all_technicians_failed');
     finish(t, 'no technician', t.timings.all_failed);
-    try {
-      await client.calls(t.residentCallSid).update({ url: `${base}/twilio/fallback`, method: 'POST' });
-    } catch (err) {
-      log(`ERROR could not redirect resident=${t.residentCallSid} to fallback: ${twilioError(err)}`);
+
+    const resident = residentCalls.get(t.residentCallSid);
+    if (!resident || resident.ended) return;
+    if (resident.agent.state === 'in' || resident.agent.state === 'joining') {
+      announce(t.residentCallSid, 'unavailable');
+    } else {
+      log(`AGENT Ava is not in the room, bringing her back for resident=${t.residentCallSid}`);
+      addAgent(t.residentCallSid, { firstMessage: FALLBACK_FIRST_MESSAGE });
     }
   }
 
-  // Runs after the winning technician's TwiML (their <Dial><Conference>) has been sent.
-  async function bridgeResident(t, winnerIndex) {
-    // Use a recorded announcement if one has been dropped into public/, otherwise speak it.
-    const announcement = fs.existsSync(connectingFile)
-      ? { play: `${base}/public/connecting.mp3` }
-      : { say: RESIDENT_ANNOUNCEMENT };
-    try {
-      // Replacing the resident's TwiML ends the <Connect><Stream> to ElevenLabs, i.e. Ava drops off.
-      await client.calls(t.residentCallSid).update({ twiml: conferenceTwiml(t.residentCallSid, announcement).toString() });
-      log(`BRIDGE resident=${t.residentCallSid} announcement=${announcement.play ? 'connecting.mp3' : 'spoken'} then ${roomName(t.residentCallSid)}`);
-    } catch (err) {
-      log(`ERROR could not move resident=${t.residentCallSid} into the conference: ${twilioError(err)}`);
+  function allFailed(t) {
+    if (t.status === 'searching') noTechnician(t);
+  }
+
+  // The resident's call is over. Stops a running search.
+  function residentGone(residentCallSid, why) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || resident.ended) return;
+    resident.ended = true;
+    log(`RESIDENT gone resident=${residentCallSid} (${why})`);
+
+    const t = transfers.get(residentCallSid);
+    if (t && (t.status === 'searching' || t.status === 'bridging')) {
       t.status = 'cancelled';
-      finish(t, 'resident hung up');
-      const winner = t.techs[winnerIndex];
-      const vr = new VoiceResponse();
-      vr.say('Sorry, the resident is no longer on the line. Goodbye.');
-      vr.hangup();
-      client.calls(winner.callSid).update({ twiml: vr.toString() }).catch(() => endTechCall(t, winnerIndex, 'resident gone'));
+      t.timings.resident_hung_up = timing(t, 'resident_hung_up', '-> cancelling all technician calls');
+      cancelTechs(t, { why: 'resident hung up' });
+      finish(t, 'resident hung up', t.timings.resident_hung_up);
     }
+  }
+
+  // A resident left alone in the room would just hear silence, so end the call.
+  function endIfResidentAlone(residentCallSid) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || resident.ended || !resident.conferenceSid) return;
+    const t = transfers.get(residentCallSid);
+    const searching = t && (t.status === 'searching' || t.status === 'bridging');
+    const alone = resident.present.size === 1 && resident.present.has(residentCallSid);
+    if (!alone || searching || resident.agent.state === 'joining') return;
+
+    log(`CONFERENCE resident=${residentCallSid} is alone in the room, ending the call`);
+    client.conferences(resident.conferenceSid)
+      .update({ status: 'completed' })
+      .catch((err) => log(`ERROR could not end conference ${resident.conferenceSid}: ${twilioError(err)}`));
   }
 
   // ---------------------------------------------------------------- resident call
 
-  async function connectToAgent(req, res, { direction, firstMessage }) {
-    const { CallSid, From, To } = req.body;
-    try {
-      const xml = await registerCall({ fromNumber: From, toNumber: To, direction, callSid: CallSid, firstMessage });
-      log(`REGISTER-CALL ok resident=${CallSid} direction=${direction}${firstMessage ? ' with first-message override' : ''}`);
-      res.type('text/xml').send(xml);
-    } catch (err) {
-      log(`ERROR register-call failed resident=${CallSid}: ${err.message}`);
-      sayAndHangup(res, 'Sorry, we are having trouble connecting you right now. Please try again later.');
-    }
-  }
-
   app.get('/health', (req, res) => res.json({ ok: true }));
 
-  // Optional audio files, e.g. public/connecting.mp3 for the resident's announcement.
+  // Optional audio files, e.g. public/connecting.mp3 for the "technician joined" announcement.
   app.use('/public', express.static(config.publicDir));
 
   // Outbound start (default way to test): rings the person playing the resident.
@@ -368,57 +489,39 @@ function createApp({ config, client, registerCall, logger = console.log }) {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
     });
-    residentCalls.set(call.sid, { direction: 'outbound', number: to, ended: false });
+    residentCalls.set(call.sid, newResidentCall({ direction: 'outbound', number: to, twilioNumber: config.twilioPhoneNumber }));
     log(`START-CALL resident=${call.sid} to=${to}`);
     res.json({ status: 'calling', call_sid: call.sid });
   }));
 
-  app.post('/twilio/outbound-answer', twilioHook, wrap(async (req, res) => {
-    const { CallSid, To } = req.body;
-    if (!residentCalls.has(CallSid)) residentCalls.set(CallSid, { direction: 'outbound', number: To, ended: false });
-    await connectToAgent(req, res, { direction: 'outbound' });
-  }));
+  // Both ways in put the resident straight into their own room. Ava is added as soon
+  // as Twilio reports the resident has joined (see /conference/status).
+  function residentIntoRoom(res, residentCallSid) {
+    log(`RESIDENT resident=${residentCallSid} -> ${roomName(residentCallSid)}, Ava will be added`);
+    sendTwiml(res, conferenceTwiml(residentCallSid, { endConferenceOnExit: true }));
+  }
 
-  app.post('/twilio/inbound', twilioHook, wrap(async (req, res) => {
-    const { CallSid, From } = req.body;
-    residentCalls.set(CallSid, { direction: 'inbound', number: From, ended: false });
-    await connectToAgent(req, res, { direction: 'inbound' });
+  app.post('/twilio/outbound-answer', twilioHook, (req, res) => {
+    const { CallSid, From, To } = req.body;
+    if (!residentCalls.has(CallSid)) {
+      residentCalls.set(CallSid, newResidentCall({ direction: 'outbound', number: To, twilioNumber: From }));
+    }
+    residentIntoRoom(res, CallSid);
+  });
 
-    // Inbound calls only report hang-ups if the number has a "Call status changes" URL.
-    // To avoid touching the shared number's config, attach the callback to this one call.
-    const timer = setTimeout(() => {
-      client.calls(CallSid)
-        .update({ statusCallback: `${base}/twilio/resident-status`, statusCallbackMethod: 'POST' })
-        .then(() => log(`STATUS-CALLBACK attached to inbound resident=${CallSid}`))
-        .catch((err) => log(`WARN could not attach status callback to resident=${CallSid}: ${twilioError(err)}`));
-    }, 1000);
-    timer.unref();
-  }));
+  app.post('/twilio/inbound', twilioHook, (req, res) => {
+    const { CallSid, From, To } = req.body;
+    residentCalls.set(CallSid, newResidentCall({ direction: 'inbound', number: From, twilioNumber: To }));
+    residentIntoRoom(res, CallSid);
+  });
 
-  // Resident's call changed state. If it ended mid-search, stop everything.
+  // Status of an outbound-started resident call. (For inbound calls the conference
+  // ending tells us the same thing, so the number's own settings stay untouched.)
   app.post('/twilio/resident-status', twilioHook, (req, res) => {
     const { CallSid, CallStatus } = req.body;
     res.sendStatus(204);
-    if (!CALL_ENDED.has(CallStatus)) return;
-
-    const resident = residentCalls.get(CallSid);
-    if (resident) resident.ended = true;
-
-    const t = transfers.get(CallSid);
-    if (t && (t.status === 'searching' || t.status === 'bridging')) {
-      t.status = 'cancelled';
-      t.timings.resident_hung_up = timing(t, 'resident_hung_up', '-> cancelling all technician calls');
-      cancelTechs(t, { why: 'resident hung up' });
-      finish(t, 'resident hung up', t.timings.resident_hung_up);
-    }
+    if (CALL_ENDED.has(CallStatus)) residentGone(CallSid, `call ${CallStatus}`);
   });
-
-  // All technicians failed: reconnect the resident to Ava with a different opening line.
-  app.post('/twilio/fallback', twilioHook, wrap(async (req, res) => {
-    const known = residentCalls.get(req.body.CallSid);
-    const direction = known ? known.direction : String(req.body.Direction || '').startsWith('outbound') ? 'outbound' : 'inbound';
-    await connectToAgent(req, res, { direction, firstMessage: FALLBACK_FIRST_MESSAGE });
-  }));
 
   // ---------------------------------------------------------------- ElevenLabs tool
 
@@ -437,10 +540,13 @@ function createApp({ config, client, registerCall, logger = console.log }) {
 
     const existing = transfers.get(callSid);
     if (existing) {
-      const message = existing.status === 'failed'
-        ? 'No technician is available right now. Offer to take a message.'
-        : 'A technician search is already running for this call. Ask the resident to keep holding.';
-      return res.json({ status: existing.status === 'failed' ? 'unavailable' : 'searching', message });
+      if (existing.status === 'failed') {
+        return res.json({ status: 'unavailable', message: 'No technician is available right now. Offer to take a message.' });
+      }
+      if (existing.status === 'connected') {
+        return res.json({ status: 'connected', message: 'A technician is on the call now. Introduce the resident and the issue, then let them talk.' });
+      }
+      return res.json({ status: 'searching', message: 'A technician search is already running for this call. Ask the resident to keep holding.' });
     }
 
     const now = Date.now();
@@ -478,7 +584,10 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     // Answer the tool straight away; the search carries on after this response.
     res.json({
       status: 'searching',
-      message: 'Searching for a technician now. Tell the resident you are finding someone and stay on the line with them. The call is handed over automatically when a technician accepts.',
+      message:
+        'Searching for a technician now. Tell the resident you are finding someone and keep talking with them. ' +
+        `You stay on the call. When you hear "${ANNOUNCEMENTS.joined}", a technician is on the line with you both: introduce the resident and summarise the issue. ` +
+        `If you hear "${ANNOUNCEMENTS.unavailable}", offer to take a message.`,
     });
     setImmediate(() => startSearch(t));
   });
@@ -566,8 +675,9 @@ function createApp({ config, client, registerCall, logger = console.log }) {
 
     // The lock. Node handles one request at a time and there is no await between
     // this check and the assignment below, so only one technician can get through.
-    if (t.status !== 'searching' || tech.outcome) {
-      const gone = t.status === 'cancelled';
+    const resident = residentCalls.get(t.residentCallSid);
+    const gone = t.status === 'cancelled' || !resident || resident.ended;
+    if (gone || t.status !== 'searching' || tech.outcome) {
       setOutcome(t, i, 'canceled', gone ? 'resident already hung up' : 'another technician accepted first');
       return sayAndHangup(res, gone ? 'Sorry, the resident has hung up. Goodbye.' : 'Another technician has already taken this call. Goodbye.');
     }
@@ -580,9 +690,9 @@ function createApp({ config, client, registerCall, logger = console.log }) {
     // Straight away: stop every other technician's phone.
     cancelTechs(t, { except: i, why: 'another technician accepted' });
 
-    // Order matters: technician goes into the room first, then the resident is moved in.
-    res.on('finish', () => bridgeResident(t, i));
-    sendTwiml(res, conferenceTwiml(t.residentCallSid, { say: TECH_ANNOUNCEMENT }));
+    // The technician joins the room where the resident and Ava already are. Nobody is
+    // moved, so Ava stays. The technician leaving does not end the call for the others.
+    sendTwiml(res, conferenceTwiml(t.residentCallSid, { say: TECH_ANNOUNCEMENT, endConferenceOnExit: false }));
   });
 
   // Status callbacks for technician calls: ringing, answered, and how the call ended.
@@ -606,6 +716,11 @@ function createApp({ config, client, registerCall, logger = console.log }) {
       if (tech.outcome === 'canceled') endTechCall(t, i, 'answered after being cancelled');
     } else if (CALL_ENDED.has(status)) {
       tech.callEnded = true;
+      if (t.winner === i && t.status === 'bridging') {
+        // Pressed 1 but dropped before reaching the room.
+        log(`TECH tech#${i} ${tech.number} accepted but the call ended before joining the room`);
+        return noTechnician(t);
+      }
       // "completed" means they picked up and the call ended without them accepting.
       if (status === 'completed') resolveTech(t, i, 'declined', 'call ended without pressing 1');
       else if (status === 'no-answer' || status === 'busy' || status === 'canceled') resolveTech(t, i, status, `Twilio reported ${status}`);
@@ -615,26 +730,60 @@ function createApp({ config, client, registerCall, logger = console.log }) {
 
   // ---------------------------------------------------------------- conference
 
+  function whoIs(residentCallSid, resident, t, body) {
+    if (body.CallSid === residentCallSid) return 'resident';
+    if (String(body.ParticipantLabel || '').startsWith('ava-') || body.CallSid === resident.agent.callSid) return 'agent';
+    if (t && t.winner !== null && t.techs[t.winner].callSid === body.CallSid) return 'technician';
+    return 'unknown';
+  }
+
   // Conference events (start / join / leave / end) and the recording callback.
+  // This is where we learn who is actually in the room.
   app.post('/conference/status', twilioHook, (req, res) => {
     res.sendStatus(204);
-    const t = transfers.get(req.query.resident);
+    const residentCallSid = req.query.resident;
+    const resident = residentCalls.get(residentCallSid);
+    const t = transfers.get(residentCallSid);
     const body = req.body;
 
     if (body.RecordingSid) {
       log(`RECORDING ${body.RecordingStatus} sid=${body.RecordingSid} conference=${body.ConferenceSid} duration=${body.RecordingDuration}s url=${body.RecordingUrl}`);
       return;
     }
-    if (!t) return;
+    if (!resident) return;
+    if (body.ConferenceSid && !resident.conferenceSid) resident.conferenceSid = body.ConferenceSid;
 
-    if (body.StatusCallbackEvent === 'participant-join' && body.CallSid === t.residentCallSid && !t.timings.resident_joined) {
-      t.status = 'connected';
-      t.timings.resident_joined = timing(t, 'resident_joined', `conference=${body.ConferenceSid}`);
-      logTimingSummary(t);
-      finish(t, 'connected', t.timings.resident_joined);
-    } else if (body.StatusCallbackEvent === 'conference-end') {
-      if (t.status === 'connected') t.status = 'ended';
+    const event = body.StatusCallbackEvent;
+    if (event === 'participant-join') {
+      const who = whoIs(residentCallSid, resident, t, body);
+      resident.present.add(body.CallSid);
+      log(`CONFERENCE ${who} joined ${roomName(residentCallSid)} call=${body.CallSid} (now ${resident.present.size} in the room)`);
+
+      if (who === 'resident') {
+        addAgent(residentCallSid);
+      } else if (who === 'agent') {
+        resident.agent.state = 'in';
+        resident.agent.callSid = body.CallSid;
+      } else if (who === 'technician' && t.status === 'bridging') {
+        t.status = 'connected';
+        t.timings.technician_joined = timing(t, 'technician_joined', `conference=${body.ConferenceSid}`);
+        logTimingSummary(t);
+        finish(t, 'connected', t.timings.technician_joined);
+        // Everyone hears it, and it is Ava's cue to introduce the resident.
+        announce(residentCallSid, 'joined');
+      }
+    } else if (event === 'participant-leave') {
+      const who = whoIs(residentCallSid, resident, t, body);
+      resident.present.delete(body.CallSid);
+      log(`CONFERENCE ${who} left ${roomName(residentCallSid)} call=${body.CallSid} (now ${resident.present.size} in the room)`);
+
+      if (who === 'agent') resident.agent.state = 'left';
+      if (who === 'resident') residentGone(residentCallSid, 'left the room');
+      else endIfResidentAlone(residentCallSid);
+    } else if (event === 'conference-end') {
       log(`CONFERENCE ended ${body.FriendlyName} conference=${body.ConferenceSid}`);
+      if (t && t.status === 'connected') t.status = 'ended';
+      residentGone(residentCallSid, 'conference ended');
     }
   });
 
@@ -662,4 +811,4 @@ function createApp({ config, client, registerCall, logger = console.log }) {
   return { app, state: { residentCalls, transfers } };
 }
 
-module.exports = { createApp, FALLBACK_FIRST_MESSAGE };
+module.exports = { createApp, FALLBACK_FIRST_MESSAGE, ANNOUNCEMENTS };

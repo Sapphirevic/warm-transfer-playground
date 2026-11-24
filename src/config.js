@@ -14,12 +14,21 @@ const REQUIRED = [
   'TECH_NUMBERS',
   'PUBLIC_BASE_URL',
   'TOOL_SECRET',
+  'TWILIO_AGENT_APP_SID',
 ];
 
 function loadConfig(env = process.env) {
   const missing = REQUIRED.filter((key) => !(env[key] || '').trim());
   if (missing.length) {
-    throw new Error(`Missing required env vars: ${missing.join(', ')} (copy .env.example to .env and fill it in)`);
+    const hint = missing.length === 1 && missing[0] === 'TWILIO_AGENT_APP_SID'
+      ? 'run "node scripts/setup-agent-app.js" to create the TwiML App and fill it in'
+      : 'copy .env.example to .env and fill it in';
+    throw new Error(`Missing required env vars: ${missing.join(', ')} (${hint})`);
+  }
+
+  const agentAppSid = env.TWILIO_AGENT_APP_SID.trim();
+  if (!/^AP[0-9a-f]{32}$/i.test(agentAppSid)) {
+    throw new Error('TWILIO_AGENT_APP_SID must be a TwiML App SID (AP followed by 32 hex characters)');
   }
 
   const techNumbers = env.TECH_NUMBERS.split(',').map((n) => n.trim()).filter(Boolean);
@@ -51,7 +60,8 @@ function loadConfig(env = process.env) {
     techNumbers,
     dialMode,
     ringTimeoutSec: Number(env.RING_TIMEOUT_SEC) || 20,
-    holdMusicUrl: (env.HOLD_MUSIC_URL || 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical').trim(),
+    // TwiML App whose Voice URL is PUBLIC_BASE_URL/twilio/agent-leg. Ava joins the call through it.
+    agentAppSid,
     // Transfer reports (one JSON file per resident call) and optional audio such as connecting.mp3.
     reportsDir: path.join(PROJECT_ROOT, 'reports'),
     publicDir: path.join(PROJECT_ROOT, 'public'),

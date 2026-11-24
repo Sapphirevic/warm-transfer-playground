@@ -3,10 +3,8 @@
 // Usage: npm run tunnel
 // Opens an ngrok tunnel to the local server and writes its public URL into
 // PUBLIC_BASE_URL in .env. Leave it running; start (or restart) the server after it.
-const fs = require('fs');
-const path = require('path');
+const { envPath, setEnvValue } = require('./env-file');
 
-const envPath = path.join(__dirname, '..', '.env');
 require('dotenv').config({ path: envPath, quiet: true });
 
 const ngrok = require('@ngrok/ngrok');
@@ -19,24 +17,20 @@ if (!authtoken) {
   process.exit(1);
 }
 
-function saveUrl(url) {
-  const before = fs.readFileSync(envPath, 'utf8');
-  const line = `PUBLIC_BASE_URL=${url}`;
-  const after = /^PUBLIC_BASE_URL=.*$/m.test(before)
-    ? before.replace(/^PUBLIC_BASE_URL=.*$/m, line)
-    : `${before.replace(/\s*$/, '')}\n${line}\n`;
-  if (after === before) return false;
-  fs.writeFileSync(envPath, after);
-  return true;
-}
-
 (async () => {
   const listener = await ngrok.forward({ addr: port, authtoken });
   const url = listener.url();
-  const changed = saveUrl(url);
+  const changed = setEnvValue('PUBLIC_BASE_URL', url);
 
   console.log(`ngrok tunnel: ${url} -> http://localhost:${port}`);
-  console.log(changed ? 'PUBLIC_BASE_URL in .env was updated. Restart the server so it picks up the new URL.' : 'PUBLIC_BASE_URL in .env already had this URL.');
+  if (changed) {
+    console.log('PUBLIC_BASE_URL in .env was updated. Because the URL changed:');
+    console.log('  1. run "node scripts/setup-agent-app.js" so Twilio reaches Ava\'s leg at the new URL');
+    console.log('  2. restart the server');
+    console.log('  3. update the tool URL in ElevenLabs');
+  } else {
+    console.log('PUBLIC_BASE_URL in .env already had this URL.');
+  }
   console.log(`ElevenLabs tool URL: ${url}/tool/request-transfer`);
   console.log('Leave this running. Press Ctrl+C to close the tunnel.');
 

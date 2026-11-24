@@ -50,6 +50,8 @@ function buildReport(t, dialMode) {
     direction: t.direction,
     summary: t.summary,
     dial_mode: dialMode,
+    // This branch keeps Ava in the room; on main she leaves when the technician joins.
+    transfer_style: 'agent stays on the call',
     started_at: iso(start),
     finished_at: iso(t.finishedAt),
     // null while the search is still running
@@ -125,6 +127,7 @@ function renderList(reports) {
   <td>${time(r.started_at)}</td>
   <td>${dash(r.resident_number)}</td>
   <td>${dash(r.dial_mode)}</td>
+  <td>${r.transfer_style ? 'stays' : 'leaves'}</td>
   <td class="${r.result === 'connected' ? 'connected' : 'other'}">${resultLabel(r)}</td>
   <td>${seconds(r.resident_wait_seconds)}</td>
   <td>${(r.technicians || []).filter((tech) => tech.outcome !== 'not-called').map((tech) => `${esc(tech.number)}: ${esc(tech.outcome)}`).join('<br>') || '-'}</td>
@@ -134,7 +137,7 @@ function renderList(reports) {
 
   return page('Transfer reports', `<h1>Transfer reports (${reports.length})</h1>
 ${reports.length === 0 ? '<p>No transfers yet. A report appears here as soon as Ava calls request_transfer.</p>' : `<div class="wrap"><table>
-<tr><th>Started</th><th>Resident</th><th>Mode</th><th>Result</th><th>Resident waited</th><th>Technicians</th><th>Summary</th><th>Call SID</th></tr>
+<tr><th>Started</th><th>Resident</th><th>Mode</th><th>Agent</th><th>Result</th><th>Resident waited</th><th>Technicians</th><th>Summary</th><th>Call SID</th></tr>
 ${rows.join('\n')}
 </table></div>`}`);
 }
@@ -165,6 +168,7 @@ function renderDetail(r) {
 <tr><th>Resident call SID</th><td>${dash(r.resident_call_sid)}</td></tr>
 <tr><th>Call direction</th><td>${dash(r.direction)}</td></tr>
 <tr><th>Dial mode</th><td>${dash(r.dial_mode)}</td></tr>
+<tr><th>Transfer style</th><td>${dash(r.transfer_style || 'agent leaves the call')}</td></tr>
 <tr><th>Tool call (start)</th><td>${time(r.started_at)}</td></tr>
 <tr><th>Finished</th><td>${time(r.finished_at)}</td></tr>
 <tr><th>Summary</th><td class="text">${dash(r.summary)}</td></tr>
