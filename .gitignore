@@ -2,3 +2,5 @@ node_modules/
 .env
 # Transfer reports contain phone numbers and call summaries.
 reports/
+# Copy of the ElevenLabs agent's settings taken before they were changed.
+.elevenlabs-agent-backup.json
