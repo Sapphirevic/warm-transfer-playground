@@ -30,7 +30,12 @@ This fixes the open item about the misconfigured agent. Settings:
 - "End conversation after silence" −1 (off). "Take turn after silence" −1, so Iris is not prodded every 7 seconds while on hold or after an update.
 - Max duration 600 seconds, kept as a cost cap.
 
-Waiting for the new agent ID in `.env`, and a read-back check.
+Verified 2026-11-25: agent "Sequential Testing" is in `.env`, and a read-only API check of all 25 settings above passed.
+
+The check caught three problems along the way, all fixed:
+- Both audio formats were left at PCM 16000.
+- The `X-Tool-Secret` header was missing at first.
+- Later the header's name had a hidden leading tab from copy-paste. Its value matched `TOOL_SECRET`, but the name would have caused a 401.
 
 ### 2026-11-25 - `sequential-with-updates` (v0.2.0)
 
@@ -95,7 +100,8 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
   - The URL is theirs to change.
 
   Recommendation: use our own free ngrok account. Waiting for a decision.
-- [ ] **ElevenLabs agent misconfigured (found 2026-11-25, call `CAd3a6…1339`).** The server log had no tool request. The ElevenLabs conversation record showed Ava called `transfer_to_technician` twice (HTTP 404 both times), then skip_turn. The agent's settings ("Ava Transfer Lab"), read through the API, showed:
+- [ ] **Rotate `TOOL_SECRET`.** Most of its value appeared in a shared screenshot on 2026-11-25. That's fine for testing, but rotate it before anything real: generate a new one, put it in `.env` and the ElevenLabs header, and restart the server.
+- [x] **ElevenLabs agent misconfigured (found 2026-11-25, call `CAd3a6…1339`).** Resolved by D11: a new agent, verified. The server log had no tool request. The ElevenLabs conversation record showed Ava called `transfer_to_technician` twice (HTTP 404 both times), then skip_turn. The agent's settings ("Ava Transfer Lab"), read through the API, showed:
   - `transfer_to_technician` points at a dead trycloudflare.com tunnel, with no path.
   - The correct tool (our server's `/tool/request-transfer`, right secret, `call_sid` as a dynamic variable) is named `check_transfer_status`. The prompt asks for `request_transfer`, so it was never used.
   - The system prompt is an older "You are Iris…" version, not the D9 prompt. The first message says "Ava", so the agent called itself both names.
