@@ -459,6 +459,23 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     sendTwiml(res, vr);
   });
 
+  // Plays a cue to Iris's leg only. The resident and the technician do not hear it;
+  // Iris hears it and her prompt tells her what to say. Resolves to true if Twilio took it.
+  function cueAgent(residentCallSid, query, text) {
+    const resident = residentCalls.get(residentCallSid);
+    const { agent } = resident;
+    return inOrder(resident, () => client.conferences(resident.conferenceSid).participants(agent.callSid)
+      .update({ announceUrl: `${base}/conference/announce?${query}`, announceMethod: 'POST' })
+      .then(() => {
+        log(`CUE to Iris only "${text}" in ${roomName(residentCallSid)}`);
+        return true;
+      })
+      .catch((err) => {
+        log(`ERROR could not send the cue "${text}" to Iris in ${roomName(residentCallSid)}: ${twilioError(err)}`);
+        return false;
+      }));
+  }
+
   // Technician i did not take the call and technician i+1 is about to be called.
   // The cue goes to Iris's leg only: the resident never hears it, they hear Iris say it.
   //   1. cue to Iris ("Technician 1 did not pick up. Calling technician 2 now.")
@@ -481,10 +498,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     t.residentUpdates.push({ tech: i, at });
     saveReport(t);
 
-    inOrder(resident, () => client.conferences(resident.conferenceSid).participants(agent.callSid)
-      .update({ announceUrl: `${base}/conference/announce?kind=tech-update&tech=${i}`, announceMethod: 'POST' })
-      .then(() => log(`UPDATE cue to Iris "${techUpdateLine(i)}" in ${roomName(t.residentCallSid)} +${secs(t.startedAt, at)} after tool call`))
-      .catch((err) => log(`ERROR could not send the technician update cue to Iris in ${roomName(t.residentCallSid)}: ${twilioError(err)}`)));
+    log(`UPDATE technician ${i + 1} did not take the call, Iris tells the resident +${secs(t.startedAt, at)} after tool call`);
+    cueAgent(t.residentCallSid, `kind=tech-update&tech=${i}`, techUpdateLine(i));
     setAgentMuted(t.residentCallSid, false, `telling the resident technician ${i + 1} did not pick up`);
     endHold(t, `Iris is telling the resident technician ${i + 1} did not pick up`);
 
@@ -602,8 +617,11 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     dialNext(t);
   }
 
-  // Nobody took it. Iris is normally still in the room, so she is told by an
-  // announcement; if her leg has dropped she is brought back with the fallback line.
+  // Nobody took it. Iris is normally still in the room, so she is told by a cue that
+  // only she hears (like a technician update) and the resident hears her apology once.
+  // If Twilio refuses that cue, the line is announced to the whole room instead, so the
+  // resident is never left in silence. If her leg has dropped she is brought back with
+  // the fallback first message.
   function noTechnician(t) {
     t.status = 'failed';
     t.timings.all_failed = timing(t, 'all_technicians_failed');
@@ -611,12 +629,20 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
     const resident = residentCalls.get(t.residentCallSid);
     if (!resident || resident.ended) return;
-    // The resident goes back to talking with Iris: music off, Iris's voice back on.
-    endHold(t, 'no technician available');
-    if (resident.agent.state === 'in' || resident.agent.state === 'joining') {
+    const { agent } = resident;
+    if (agent.state === 'in' && agent.callSid) {
+      // Cue first, then music off and Iris's voice back on, all while the cue plays.
+      cueAgent(t.residentCallSid, 'kind=unavailable', ANNOUNCEMENTS.unavailable).then((cued) => {
+        if (!cued) announce(t.residentCallSid, 'unavailable');
+      });
       setAgentMuted(t.residentCallSid, false, 'no technician available');
+      endHold(t, 'no technician available');
+    } else if (agent.state === 'joining') {
+      // Her leg is still connecting: no call to cue yet, so tell the room.
+      endHold(t, 'no technician available');
       announce(t.residentCallSid, 'unavailable');
     } else {
+      endHold(t, 'no technician available');
       log(`AGENT Iris is not in the room, bringing her back for resident=${t.residentCallSid}`);
       addAgent(t.residentCallSid, { firstMessage: FALLBACK_FIRST_MESSAGE });
     }

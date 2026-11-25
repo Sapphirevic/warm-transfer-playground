@@ -18,7 +18,7 @@ The resident, Iris and the technician all sit in one Twilio conference room, `ro
 5. **If the technician does not take the call** (no answer, busy, voicemail, declined, no key pressed, or the call could not be placed) and there is another technician to try, the resident is told. See [Technician updates](#technician-updates). The next technician is dialled at the same moment.
 6. A technician who presses 1 hears "Connecting you to the resident." and joins the same room.
 7. The server stops the hold music and makes sure Iris is muted, then everyone hears "A technician has joined the call." From here the resident and the technician talk to each other and **Iris says nothing**: she stays on the call and keeps listening, but nobody can hear her. Nobody is moved, so her conversation carries on and she remembers everything said before. If the technician hangs up, Iris is unmuted and the resident is talking to her again.
-8. If the last technician fails too, the music stops, Iris is unmuted, everyone hears "No technician is available right now." and Iris, still on the call, offers to take a message. (No technician update is given for the last one: this message replaces it.)
+8. If the last technician fails too, the server plays "No technician is available right now." to **Iris's leg only** (like a technician update), the music stops and Iris is unmuted. The resident hears only Iris: "Sorry, no technician is available right now. Can I take a message?" (No technician update is given for the last one: this message replaces it.) If Twilio refuses the cue to Iris, the line is announced to the whole room instead, so the resident is never left in silence.
 
 ## Technician updates
 
@@ -263,7 +263,8 @@ REGISTER-CALL ok resident=CA1f... direction=outbound
 CONFERENCE agent joined room-CA1f... call=CA7b... (now 2 in the room)
 WINNER tech#0 +15550000001 call=CA9c... resident=CA1f...
 TECH tech#0 +15550000001 call=CA9c... -> no-answer (Twilio reported no-answer) resident=CA1f...
-UPDATE cue to Iris "Technician 1 did not pick up. Calling technician 2 now." in room-CA1f... +21.4s after tool call
+UPDATE technician 1 did not take the call, Iris tells the resident +21.4s after tool call
+CUE to Iris only "Technician 1 did not pick up. Calling technician 2 now." in room-CA1f...
 AGENT Iris unmuted in room-CA1f... (telling the resident technician 1 did not pick up)
 HOLD resident=CA1f... off hold (Iris is telling the resident technician 1 did not pick up)
 DIAL tech#1 +15550000002 call=CA4d... resident=CA1f...
@@ -290,10 +291,10 @@ Run these with real phones. Use at least two technician numbers, three for case 
 | 5 | Iris leaves | Have Iris end her conversation while the technician is on | Resident and technician stay connected |
 | 6 | Resident leaves | Resident hangs up | Call ends for the technician and Iris |
 | 7 | Decline | Technician 1 presses 2 (or hangs up) | Log: `-> declined`. Sequential: technician 2 rings. Resident is still with Iris |
-| 8 | No answer, Iris tells the resident | Let technician 1 ring out (about 20s) | Music stops; after a few seconds of silence Iris says technician 1 did not pick up and she is trying the next one. You must **not** hear the cue itself in a robot voice. About 10s later the music is back. Log: `-> no-answer`, `UPDATE cue to Iris`, `AGENT Iris unmuted`, `HOLD ... off hold`, then `DIAL tech#1` and later `HOLD ... on hold with music` |
+| 8 | No answer, Iris tells the resident | Let technician 1 ring out (about 20s) | Music stops; after a few seconds of silence Iris says technician 1 did not pick up and she is trying the next one. You must **not** hear the cue itself in a robot voice. About 10s later the music is back. Log: `-> no-answer`, `UPDATE technician 1 did not take the call`, `CUE to Iris only`, `AGENT Iris unmuted`, `HOLD ... off hold`, then `DIAL tech#1` and later `HOLD ... on hold with music` |
 | 8b | Two updates | Let technicians 1 and 2 both ring out, technician 3 presses 1 | Iris gives the update twice (technician 1, then technician 2), then technician 3 joins. Report: two entries in **Resident told** |
 | 9 | Voicemail | Let technician 1's voicemail pick up | Log: `AnsweredBy=machine_start`, `-> voicemail`, `CANCEL ... sent status=completed` |
-| 10 | All fail | Every technician declines or does not answer | An update after each technician except the last. Then music stops, everyone hears "No technician is available right now." and Iris offers to take a message, in the same conversation. Log: `TRANSFER NO TECHNICIAN`, `ANNOUNCE` |
+| 10 | All fail | Every technician declines or does not answer | An update after each technician except the last. Then music stops and Iris says "Sorry, no technician is available right now. Can I take a message?", in the same conversation. You must **not** hear "No technician is available right now." in a robot voice first. Log: `TRANSFER NO TECHNICIAN`, `CUE to Iris only "No technician is available right now."` |
 | 11 | Resident hangs up while waiting | Resident hangs up while a technician phone is ringing | Log: `RESIDENT gone`, `CANCEL ... (resident hung up)`, `TRANSFER RESIDENT HUNG UP`. The technician phone stops ringing and no update is given |
 
 After each case, open http://localhost:3000/reports and check the result, the outcomes and the wait time.

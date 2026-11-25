@@ -14,6 +14,30 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-25 - first successful real call, duplicate message fixed (v0.2.2)
+
+**First real call on this branch** (call `CA67c5…dc83`, agent "Sequential Testing"). The search went as designed:
+- Tool call succeeded; hold music started 5.3 s later.
+- Technician 1 answered at 13.5 s and hung up without pressing 1 at 30.0 s (declined).
+- The update was cued at +30 s, and Iris said "Sorry, technician one didn't pick up. I'm trying the next one now, please hold."
+- The music came back 10.3 s later, and Iris was muted again.
+- Technician 2 rang out at 50.8 s, so the result was "no technician".
+
+The server report and the ElevenLabs transcript agree on this order.
+
+Still to confirm: whether the resident heard the technician cue itself. The open item about real-call checks stays open for that.
+
+Before that call, register-call had failed with HTTP 401 `missing the permission convai_write`. The ElevenLabs API key had **ElevenAgents: Read** only. It was changed to **Write**, with the same key and no `.env` change. This permission is needed to start every conversation. The read-only agent check cannot detect it, because reading works with Read.
+
+**D12. "No technician is available right now" goes to Iris's leg only.**
+On that call the resident heard the line twice: Twilio's voice to the whole room, then Iris. Now the line is a private cue to Iris, like D3, so the resident hears only Iris's apology.
+- Order: cue first, then Iris unmuted and the music off.
+- If Twilio refuses the cue, the line is announced to the whole room instead, so the resident is never left in silence. This was the trade-off noted in the open item.
+- If Iris's leg is still connecting (no call to cue yet), the room announcement is used as before.
+- If her leg has dropped, she is brought back with the fallback first message, as before.
+
+Code: `cueAgent` and `noTechnician` in `src/app.js`. The technician update (D3) now uses the same `cueAgent` helper.
+
 ### 2026-11-25 - agent renamed to Iris (v0.2.1)
 
 **D10. The agent is called Iris, not Ava.**
@@ -90,7 +114,7 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
   - `HOLD_MUSIC_RESUME_SEC=10` fits her sentence.
 
   README test-checklist cases 8 and 8b cover these.
-- [ ] **Duplicate "no technician" message.** When the last technician fails, the room hears "No technician is available right now." in Twilio's voice, then Ava says nearly the same thing. This already happens on `agent-stays-on-call`.
+- [x] **Duplicate "no technician" message.** Fixed by D12 (2026-11-25), after it was heard on the first real call. Original note: When the last technician fails, the room hears "No technician is available right now." in Twilio's voice, then Ava says nearly the same thing. This already happens on `agent-stays-on-call`.
   - Proposed fix: send that cue to Ava's leg only, like D3.
   - Trade-off: if Twilio refused the cue, the resident would hear nothing at that moment.
   - Waiting for a decision.
@@ -126,4 +150,8 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | --- | --- | --- | --- |
 | 2026-11-25 | D1-D8 | `npm test` (simulated Twilio and ElevenLabs, no network, no credit used) | 51/51 pass, 5 runs in a row |
 | 2026-11-25 | D1-D8 | Broke the feature on purpose 3 ways, re-ran tests, restored | No update call: 9 tests fail. Update does not cancel pending hold: 1 fails. Cue to whole room: 9 fail. Code restored and matched the backup exactly |
+| 2026-11-25 | New agent (D11) | Read-only ElevenLabs API check of 25 settings | All pass after 3 fixes (audio formats, missing header, header name with a hidden tab) |
+| 2026-11-25 | D1-D9 on a real call | Server log, saved report and ElevenLabs transcript of call `CA67c5…dc83`, compared with each other | Order and timings agree. Update spoken by Iris, music resumed after 10.3 s. Duplicate "no technician" message heard (fixed by D12) |
+| 2026-11-25 | D10 rename, D12 | `npm test` | 52/52 pass, 5 runs in a row |
+| 2026-11-25 | D12 | Broke it on purpose 2 ways, re-ran tests, restored | Back to the room-wide announcement: 7 tests fail. No fallback when Twilio refuses the cue: 1 fails. Code restored and matched the backup exactly |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |

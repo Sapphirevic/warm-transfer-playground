@@ -44,7 +44,7 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
   const holds = []; //          same call with "hold" -> the resident's hold music
   const agentCues = []; //      conferences(sid).participants(callSid).update({ announceUrl }) -> cue to one leg
   const roomActions = []; //    mutes, holds, announcements and room endings, in the order they were sent
-  const flags = { failAgentAdd: false, failRegister: false, failConversations: false, failMute: false };
+  const flags = { failAgentAdd: false, failRegister: false, failConversations: false, failMute: false, failAgentCue: false };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-transfer-test-'));
   // Stand-in for the ElevenLabs conversations API: what it would return for a call.
   const elevenLabs = { details: [], lookups: [] };
@@ -79,8 +79,10 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
       update: async (options) => {
         if ('announceUrl' in options) {
           const url = new URL(options.announceUrl);
-          roomActions.push(`cue:${url.searchParams.get('kind')}:${url.searchParams.get('tech')}`);
+          const techParam = url.searchParams.get('tech');
+          roomActions.push(`cue:${url.searchParams.get('kind')}${techParam === null ? '' : `:${techParam}`}`);
           agentCues.push({ conferenceSid: sid, callSid, ...options });
+          if (flags.failAgentCue) throw Object.assign(new Error('Participant not found'), { code: 20404 });
           return { callSid };
         }
         if ('hold' in options) {
@@ -528,7 +530,7 @@ test('hold music: when nobody is available the music stops and Iris gets her voi
 
   // Technician 1 failing gives the update (music off, Iris's voice back); technician 2
   // failing is the end of the list, so "no technician" with nothing left to undo.
-  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'announce:unavailable']);
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'cue:unavailable']);
   const report = s.report();
   assert.equal(report.result, 'no technician');
   assert.ok(report.hold_ended_at);
@@ -543,8 +545,8 @@ test('hold music, one technician only: nobody to update about, so it goes straig
 
   await s.tech(0).status('no-answer');
   await tick();
-  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'hold:false', 'mute:false', 'announce:unavailable']);
-  assert.deepEqual(s.agentCues, []);
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:unavailable', 'mute:false', 'hold:false']);
+  assert.equal(s.agentCues.filter((c) => c.announceUrl.includes('kind=tech-update')).length, 0, 'no technician update for the last (only) technician');
 });
 
 test('hold music: not started if the search is already over, and can be switched off', async (t) => {
@@ -700,12 +702,13 @@ test('accepted but dropped before reaching the room: counts as no technician and
 
   assert.equal(s.transfer().status, 'failed');
   assert.equal(s.report().result, 'no technician');
-  assert.deepEqual(s.announcements(), ['unavailable']);
+  assert.deepEqual(s.announcements(), [], 'nothing is announced to the room');
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['unavailable'], 'Iris alone is told');
 });
 
 // ---------------------------------------------------------------- nobody available
 
-test('all fail: Iris is still in the room, so she is told by an announcement and nobody is moved', async (t) => {
+test('all fail: Iris is still in the room, so only she hears "No technician is available" and the resident hears her say it once', async (t) => {
   const s = await setup();
   t.after(s.close);
   await s.residentAsksForTransfer();
@@ -716,7 +719,11 @@ test('all fail: Iris is still in the room, so she is told by an announcement and
   await tick();
 
   assert.equal(s.transfer().status, 'failed');
-  assert.deepEqual(s.announcements(), ['unavailable']);
+  assert.deepEqual(s.announcements(), [], 'not announced to the room, so the resident does not hear it twice');
+  const last = s.agentCues.at(-1);
+  assert.equal(new URL(last.announceUrl).searchParams.get('kind'), 'unavailable');
+  assert.equal(last.callSid, s.agentLegs[0].callSid, "sent to Iris's leg");
+  assert.ok(s.logs.some((line) => line.includes('CUE to Iris only "No technician is available right now."')));
   assert.deepEqual(s.updates.filter((u) => u.sid === RESIDENT), [], 'resident call is not updated');
   assert.equal(s.agentLegs.length, 1, 'no second Iris');
   assert.equal(s.registered.length, 1, 'same ElevenLabs conversation');
@@ -756,6 +763,18 @@ test('all fail after Iris dropped: she is brought back with the first-message ov
   assert.equal(s.registered.at(-1).firstMessage, FALLBACK_FIRST_MESSAGE);
   assert.equal(s.registered.at(-1).callSid, RESIDENT);
   assert.equal(s.roomEnded(), false);
+});
+
+test('all fail, and Twilio refuses the cue to Iris: the line is announced to the whole room instead', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001'] });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  s.flags.failAgentCue = true;
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.roomActions, ['cue:unavailable', 'announce:unavailable'], 'tried Iris first, then the room');
+  assert.ok(s.logs.some((line) => line.includes('ERROR could not send the cue "No technician is available right now." to Iris') && line.includes('Twilio error 20404')));
 });
 
 // ---------------------------------------------------------------- resident hangs up
@@ -863,7 +882,7 @@ test('update: technician 1 does not pick up -> Iris alone hears the cue, the nex
   assert.equal(report.resident_updates[0].number, '+15550000001');
   assert.equal(report.resident_updates[0].cue, 'Technician 1 did not pick up. Calling technician 2 now.');
   assert.equal(typeof report.resident_updates[0].seconds_from_tool_call, 'number');
-  assert.ok(s.logs.some((line) => line.includes('UPDATE cue to Iris "Technician 1 did not pick up.')));
+  assert.ok(s.logs.some((line) => line.includes('CUE to Iris only "Technician 1 did not pick up.')));
 
   // Technician 2 takes it: the normal join, no further update.
   await s.techAcceptsAndJoins(1);
@@ -893,8 +912,10 @@ test('update: every way of not taking the call gets it (busy, voicemail, decline
   await tick();
 
   assert.deepEqual(s.outcomes(), ['busy', 'voicemail', 'declined', 'declined', 'failed', 'no-answer']);
-  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('tech')), ['0', '1', '2', '3', '4']);
-  assert.deepEqual(s.announcements(), ['unavailable']);
+  const cues = s.agentCues.map((c) => new URL(c.announceUrl).searchParams);
+  assert.deepEqual(cues.filter((q) => q.get('kind') === 'tech-update').map((q) => q.get('tech')), ['0', '1', '2', '3', '4']);
+  assert.equal(cues.at(-1).get('kind'), 'unavailable', 'the last one is told "no technician" instead');
+  assert.deepEqual(s.announcements(), []);
   assert.deepEqual(s.report().resident_updates.map((u) => u.technician), [1, 2, 3, 4, 5]);
 });
 
@@ -988,7 +1009,7 @@ test('update with hold music: the last technician failing straight after an upda
   await s.tech(1).status('no-answer');
   await wait(250); // past the time the music would have come back
 
-  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'announce:unavailable']);
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'cue:unavailable']);
   assert.equal(s.report().result, 'no technician');
 });
 
