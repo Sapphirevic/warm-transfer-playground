@@ -1,6 +1,6 @@
 # Warm-transfer playground (Twilio + ElevenLabs)
 
-> **Branch `agent-stays-on-call`.** On this branch Ava stays on the call with the resident and the technician (a three-way call). On `main` she hands the resident over and leaves. See [Switching between the two versions](#switching-between-the-two-versions).
+> **Branch `sequential-with-updates`** (built on `agent-stays-on-call`). Ava stays on the call with the resident and the technician (a three-way call). Technicians are called **one at a time**, and each time one does not take the call, **Ava tells the resident** before the next one is called. There is no parallel calling on this branch. On `main` Ava hands the resident over and leaves. See [Switching between versions](#switching-between-versions).
 
 A small Express server for trying out a warm transfer from an ElevenLabs agent ("Ava") to a human technician.
 
@@ -14,10 +14,24 @@ The resident, Ava and the technician all sit in one Twilio conference room, `roo
 1. The resident's call goes straight into the room.
 2. The server adds Ava to the room as her own call leg. Twilio reaches that leg through a TwiML App whose Voice URL is `/twilio/agent-leg`, and that endpoint returns the ElevenLabs register-call TwiML. The resident hears a second or two of silence, then Ava.
 3. Ava calls the `request_transfer` tool with a `summary` and the resident's `call_sid`. The server answers straight away (`"status": "searching"`) and calls technicians in the background. Ava asks the resident to hold, and about 5 seconds after the tool call the resident is put on **hold music** and Ava is muted. See [Hold music](#hold-music).
-4. A technician who picks up hears the summary and "Press 1 to connect to the resident." (up to 3 times). Answering-machine detection runs in the background.
-5. The first technician to press 1 wins. Every other technician call is ended at once. The winner hears "Connecting you to the resident." and joins the same room.
-6. The server stops the hold music and makes sure Ava is muted, then everyone hears "A technician has joined the call." From here the resident and the technician talk to each other and **Ava says nothing**: she stays on the call and keeps listening, but nobody can hear her. Nobody is moved, so her conversation carries on and she remembers everything said before. If the technician hangs up, Ava is unmuted and the resident is talking to her again.
-7. If every technician fails, the music stops, Ava is unmuted, everyone hears "No technician is available right now." and Ava, still on the call, offers to take a message.
+4. Technicians are called **one at a time**, in `TECH_NUMBERS` order. A technician who picks up hears the summary and "Press 1 to connect to the resident." (up to 3 times). Answering-machine detection runs in the background.
+5. **If the technician does not take the call** (no answer, busy, voicemail, declined, no key pressed, or the call could not be placed) and there is another technician to try, the resident is told. See [Technician updates](#technician-updates). The next technician is dialled at the same moment.
+6. A technician who presses 1 hears "Connecting you to the resident." and joins the same room.
+7. The server stops the hold music and makes sure Ava is muted, then everyone hears "A technician has joined the call." From here the resident and the technician talk to each other and **Ava says nothing**: she stays on the call and keeps listening, but nobody can hear her. Nobody is moved, so her conversation carries on and she remembers everything said before. If the technician hangs up, Ava is unmuted and the resident is talking to her again.
+8. If the last technician fails too, the music stops, Ava is unmuted, everyone hears "No technician is available right now." and Ava, still on the call, offers to take a message. (No technician update is given for the last one: this message replaces it.)
+
+## Technician updates
+
+When technician N does not take the call and technician N+1 is about to be called:
+
+1. The server plays a short cue to **Ava's call leg only**: "Technician N did not pick up. Calling technician N+1 now." The resident does not hear the cue; the room does not hear it either.
+2. While the cue plays, Ava is unmuted and the resident is taken off hold, so the resident hears about 3 seconds of silence.
+3. Ava hears the cue and, as her system prompt tells her, says one sentence to the resident, such as "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold."
+4. `HOLD_MUSIC_RESUME_SEC` seconds after the update started (default `10`), the music comes back and Ava is muted again, unless a technician has accepted or the search has ended by then.
+
+The cue only ever contains positions (1, 2, 3), never phone numbers, so Ava has nothing private to read out. If Ava is not in the room at that moment (her leg dropped), the update is skipped and logged as `UPDATE skipped`; the search carries on.
+
+The server only sends the cue: what Ava says comes from her **ElevenLabs system prompt** (see step 4 of [Setup](#4-configure-the-elevenlabs-agent)). The tool reply also tells her what the cue means.
 
 Who can end the call:
 
@@ -94,13 +108,24 @@ Run the same command again whenever `PUBLIC_BASE_URL` changes; it then updates t
 
 `call_sid` is always the **resident's** Twilio call SID, even though Ava is on her own leg.
 
-**Prompt.** Ava now hears the resident and the technician as one audio stream and cannot tell them apart by herself. Add something like this to her system prompt and adjust it to taste:
+**Prompt.** Ava now hears the resident and the technician as one audio stream and cannot tell them apart by herself. The system prompt used for testing this branch (it relies on the ElevenLabs **skip_turn** system tool, so enable it):
 
-> When the resident needs a technician, call `request_transfer` with a short summary. When it returns "searching", say one short sentence such as "Please hold for a moment while I connect you with a technician", then say nothing more. Hold music starts for the resident a few seconds later and they cannot hear you while it plays. You stay on the call.
->
-> When you hear "A technician has joined the call", a technician is now talking with the resident. From that moment say nothing at all: do not greet the technician, do not introduce anyone, and do not answer even if someone speaks to you. Stay silent until the technician has left.
->
-> When you hear "No technician is available right now", apologise and offer to take a message.
+```
+You are Ava, a voice assistant for an apartment building.
+
+Say: "Hi, this is Ava. How can I help you today?"
+Let the caller explain their problem.
+Say: "Thanks. I'm connecting you to a technician now. Please hold."
+Immediately call the request_transfer tool with a one-sentence summary of the problem.
+After calling the tool, do not speak. On every turn, call the skip_turn tool instead of replying. The only exceptions are the two messages below.
+
+If you hear "Technician 1 did not pick up. Calling technician 2 now." (or the same sentence with other numbers), say exactly: "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold." Use the technician number you heard. Say it once, then go back to calling skip_turn on every turn, even if the caller answers you.
+
+When you hear "A technician has joined the call", keep calling skip_turn on every turn. Never speak, even if someone talks to you.
+If you hear "No technician is available right now", say: "Sorry, no technician is available right now. Can I take a message?" Keep every reply to one short sentence. Never use the transfer_to_number tool.
+```
+
+The technician-update line must stay short: the music comes back `HOLD_MUSIC_RESUME_SEC` seconds after the cue starts, and about 3 of those seconds are the cue itself.
 
 Ava's silence does not depend on this prompt. The server mutes her call leg while the technician is in the room, so nobody hears her even if the model produces a reply. The prompt, together with the ElevenLabs **Skip turn** system tool, only stops her from generating replies into the void (they would show up in the transcript marked "muted, not heard").
 
@@ -143,7 +168,7 @@ If you can change the number's configuration: Twilio Console > Phone Numbers > y
 | `POST /tech/accept` | Twilio | Technician pressed a key. `1` wins the lock and joins the room |
 | `POST /tech/status` | Twilio | Technician call status: ringing, answered, busy, no-answer, failed, completed |
 | `POST /conference/status` | Twilio | Who joined and left the room, and the recording callback |
-| `POST /conference/announce` | Twilio | The line spoken to the room ("A technician has joined the call." / "No technician is available right now.") |
+| `POST /conference/announce` | Twilio | The line spoken to the room ("A technician has joined the call." / "No technician is available right now."), or with `kind=tech-update&tech=N` the cue played to Ava's leg only |
 | `GET /reports` | your browser, on this machine only | HTML table of all transfers, newest first |
 | `GET /reports/:sid` | your browser, on this machine only | Detail view for one resident call |
 | `GET /public/...` | Twilio | Optional audio files, such as `public/connecting.mp3` |
@@ -162,7 +187,12 @@ Every transfer is saved as `reports/<resident_call_sid>.json` and updated as the
 
 The **Agent** column shows `stays` for transfers made on this branch and `leaves` for ones made on `main`, so runs of the two versions can be compared side by side. Reports are shared between branches because `reports/` is not tracked by git.
 
-Each record holds the resident's number and call SID, the summary, the dial mode, the start time (the tool call), the final result and how long the resident waited. For each technician it holds the number, when they were dialled, when their phone rang, when they answered, the outcome, and each of those as seconds from the tool call.
+Each record holds the resident's number and call SID, the summary, the dial mode (always `sequential` on this branch), the start time (the tool call), the final result and how long the resident waited. For each technician it holds the number, when they were dialled, when their phone rang, when they answered, the outcome, and each of those as seconds from the tool call.
+
+On this branch a record also holds:
+
+- `resident_updates`: one entry per technician update (technician position and number, the cue Ava heard, when it was sent). The detail page shows these in a **Resident told** column and as markers in the transcript.
+- `hold_periods` and `agent_mute_periods`: every stretch of hold music and of Ava being muted. There can be several in one search, because each update briefly ends both. `hold_started_at` / `hold_ended_at` and `agent_muted_at` / `agent_unmuted_at` are kept as the first start and the last end.
 
 | Result | Meaning | Resident wait is measured to |
 | --- | --- | --- |
@@ -179,7 +209,7 @@ Each record holds the resident's number and call SID, the summary, the dial mode
 | `voicemail` | Answering machine detected |
 | `canceled` | We ended the call: another technician accepted, or the resident hung up |
 | `failed` | Twilio could not place the call (the reason is in `detail`) |
-| `not-called` | Never dialled, because the search ended first (sequential mode) |
+| `not-called` | Never dialled, because the search ended first |
 
 The report pages are only served to `localhost`, not through the ngrok URL, because they contain phone numbers, call summaries and transcripts.
 
@@ -203,6 +233,7 @@ While technicians are being called, the resident hears music instead of silence.
 - The music is `HOLD_MUSIC_URL`: Twilio's classical hold music by default, or a link to your own `.mp3` or `.wav` file.
 - Ava is muted for the same period, so nothing she says is lost on a resident who cannot hear it.
 - The music stops when a technician joins, or when every technician has failed (Ava is then unmuted and talks to the resident again).
+- It also pauses for each [technician update](#technician-updates) and comes back `HOLD_MUSIC_RESUME_SEC` seconds later (default `10`). If Ava's update sentence gets cut off, raise it; if there is a silent gap before the music, lower it.
 - Set `HOLD_MUSIC_DELAY_SEC=off` to turn it off. Ava then keeps talking with the resident during the search, as before.
 - The report records `hold_started_at` and `hold_ended_at`, and the transcript shows both moments.
 
@@ -224,32 +255,39 @@ AGENT adding Ava to room-CA1f... leg=CA7b...
 REGISTER-CALL ok resident=CA1f... direction=outbound
 CONFERENCE agent joined room-CA1f... call=CA7b... (now 2 in the room)
 WINNER tech#0 +15550000001 call=CA9c... resident=CA1f...
-CONFERENCE technician joined room-CA1f... call=CA9c... (now 3 in the room)
+TECH tech#0 +15550000001 call=CA9c... -> no-answer (Twilio reported no-answer) resident=CA1f...
+UPDATE cue to Ava "Technician 1 did not pick up. Calling technician 2 now." in room-CA1f... +21.4s after tool call
+AGENT Ava unmuted in room-CA1f... (telling the resident technician 1 did not pick up)
+HOLD resident=CA1f... off hold (Ava is telling the resident technician 1 did not pick up)
+DIAL tech#1 +15550000002 call=CA4d... resident=CA1f...
+HOLD resident=CA1f... on hold with music (searching for a technician)
+WINNER tech#1 +15550000002 call=CA4d... resident=CA1f...
+CONFERENCE technician joined room-CA1f... call=CA4d... (now 3 in the room)
 ANNOUNCE "A technician has joined the call." in room-CA1f...
-TRANSFER CONNECTED resident=+15551110000 call=CA1f... technician=+15550000001 waited=22.1s mode=parallel tried=[...] report=/reports/CA1f...
+TRANSFER CONNECTED resident=+15551110000 call=CA1f... technician=+15550000002 waited=48.9s tried=[+15550000001=no-answer, +15550000002=accepted] report=/reports/CA1f...
 ```
 
 `TIMING` lines show seconds since the tool call, and a `TIMING SUMMARY` is printed when the technician joins (tool call, first technician ringing, technician answered, pressed 1, technician joined). Each technician call the server ends is logged as `CANCEL tech#N ... was=ringing sent status=canceled (reason)`; Twilio errors as `ERROR cancel ...` with the error code.
 
 ## Test checklist
 
-Run these with real phones. Repeat the starred ones with `DIAL_MODE=parallel`.
+Run these with real phones. Use at least two technician numbers, three for case 8b.
 
 | # | Case | How to test | Expected |
 | --- | --- | --- | --- |
 | 1 | Ava joins | Start a call and answer as the resident | A second or two of silence, then Ava greets you. Log: `AGENT adding Ava`, `REGISTER-CALL ok`, `CONFERENCE agent joined` |
 | 2a | Hold music | Ask for a technician | Ava says "please hold", then music plays until a technician joins or the search fails. Log: `HOLD resident=... on hold with music`, `AGENT Ava muted` |
-| 2 | Accept, Ava silent * | Ask for a technician; technician presses 1 | Music stops. Technician hears "Connecting you to the resident." Everyone hears "A technician has joined the call." Resident and technician talk; Ava is not heard, even if you speak to her. Log: `WINNER`, `CONFERENCE technician joined ... (now 3 in the room)`, `AGENT Ava muted`, `TRANSFER CONNECTED` |
+| 2 | Accept, Ava silent | Ask for a technician; technician presses 1 | Music stops. Technician hears "Connecting you to the resident." Everyone hears "A technician has joined the call." Resident and technician talk; Ava is not heard, even if you speak to her. Log: `WINNER`, `CONFERENCE technician joined ... (now 3 in the room)`, `AGENT Ava muted`, `TRANSFER CONNECTED` |
 | 3 | Technician leaves, Ava remembers | Technician hangs up, then ask Ava something from earlier in the call | Log: `AGENT Ava unmuted`. She answers, from the same conversation |
 | 4 | Transcript | Open the report after the call | The resident-technician conversation is there; anything Ava produced while muted is struck through and marked "muted, not heard" |
 | 5 | Ava leaves | Have Ava end her conversation while the technician is on | Resident and technician stay connected |
 | 6 | Resident leaves | Resident hangs up | Call ends for the technician and Ava |
 | 7 | Decline | Technician 1 presses 2 (or hangs up) | Log: `-> declined`. Sequential: technician 2 rings. Resident is still with Ava |
-| 8 | No answer | Let technician 1 ring out (about 20s) | Log: `-> no-answer`, then technician 2 is dialled |
-| 9 | Voicemail * | Let technician 1's voicemail pick up | Log: `AnsweredBy=machine_start`, `-> voicemail`, `CANCEL ... sent status=completed` |
-| 10 | All fail | Every technician declines or does not answer | Music stops. Everyone hears "No technician is available right now." Ava offers to take a message, in the same conversation. Log: `TRANSFER NO TECHNICIAN`, `ANNOUNCE` |
-| 11 | Resident hangs up while waiting | Resident hangs up while a technician phone is ringing | Log: `RESIDENT gone`, `CANCEL ... (resident hung up)`, `TRANSFER RESIDENT HUNG UP`. The technician phone stops ringing |
-| 12 | Race (parallel only) * | Two technicians answer, both press 1 | Exactly one `WINNER`. The other hears "Another technician has already taken this call." |
+| 8 | No answer, Ava tells the resident | Let technician 1 ring out (about 20s) | Music stops; after a few seconds of silence Ava says technician 1 did not pick up and she is trying the next one. You must **not** hear the cue itself in a robot voice. About 10s later the music is back. Log: `-> no-answer`, `UPDATE cue to Ava`, `AGENT Ava unmuted`, `HOLD ... off hold`, then `DIAL tech#1` and later `HOLD ... on hold with music` |
+| 8b | Two updates | Let technicians 1 and 2 both ring out, technician 3 presses 1 | Ava gives the update twice (technician 1, then technician 2), then technician 3 joins. Report: two entries in **Resident told** |
+| 9 | Voicemail | Let technician 1's voicemail pick up | Log: `AnsweredBy=machine_start`, `-> voicemail`, `CANCEL ... sent status=completed` |
+| 10 | All fail | Every technician declines or does not answer | An update after each technician except the last. Then music stops, everyone hears "No technician is available right now." and Ava offers to take a message, in the same conversation. Log: `TRANSFER NO TECHNICIAN`, `ANNOUNCE` |
+| 11 | Resident hangs up while waiting | Resident hangs up while a technician phone is ringing | Log: `RESIDENT gone`, `CANCEL ... (resident hung up)`, `TRANSFER RESIDENT HUNG UP`. The technician phone stops ringing and no update is given |
 
 After each case, open http://localhost:3000/reports and check the result, the outcomes and the wait time.
 
@@ -270,6 +308,7 @@ A real call on this branch has connected: Ava joined the room through the TwiML 
 - **What Ava does while muted.** She still hears both people and may keep generating replies that nobody hears. They cost ElevenLabs usage and clutter the transcript; the prompt and the Skip turn tool reduce this.
 - **Which resident the leg is for.** The server passes the resident's call SID to the TwiML App as a custom parameter. If Twilio does not deliver it, the server falls back to "the one call currently waiting for Ava", which is right as long as two calls do not start at the same instant.
 - **If Ava never speaks**, look for `ERROR could not add Ava` or `ERROR /twilio/agent-leg` in the log.
+- **Technician updates (this branch) have not been tried on a real call yet.** Three things to listen for: that the resident does not hear the cue (it is sent to Ava's participant only, which is Twilio's documented behaviour but not yet heard here); that Ava breaks out of her skip_turn loop to give the update; and whether `HOLD_MUSIC_RESUME_SEC=10` suits her sentence.
 
 ## Trial accounts and Geo Permissions
 
@@ -287,24 +326,30 @@ Twilio blocks outbound calls to countries that are not enabled. Enable the count
 - **Live call state is in memory.** Restarting the server forgets calls that are in progress (saved reports are kept).
 - **One search per call.** If Ava calls `request_transfer` again on the same call, she is told a search is already running, that a technician is on the call, or that nobody is available.
 - **Answering-machine detection is asynchronous.** The summary starts the moment the call is picked up. Only a `machine` or `fax` result does anything: that call is hung up and counted as `voicemail`. A technician who answers with a long greeting can be misclassified.
-- **Parallel mode** places one separate call per technician. The other phones stop when one technician presses 1, not when one picks up, so a voicemail cannot cancel the others.
+- **One technician at a time.** There is no parallel calling on this branch. `DIAL_MODE` in `.env` is not used; keep it at `sequential`, which every branch accepts (`main` and `agent-stays-on-call` refuse to start on any value other than `sequential` or `parallel`). Any other value prints a startup warning here.
+- **Shared ngrok account.** If the ngrok authtoken belongs to someone else, only one of you can have the tunnel open at a time, and the requests (phone numbers, summaries, the `X-Tool-Secret` header) can be seen in that account's ngrok dashboard.
 - **Cost.** Ava's leg is an extra call leg that lasts the whole call, in addition to the resident's and the technician's.
 - **Recording.** The conference is recorded from the first second, so the recording includes the resident's conversation with Ava. Check the consent rules that apply to you.
 
-## Switching between the two versions
+## Switching between versions
+
+| Branch | Ava | Technicians |
+| --- | --- | --- |
+| `main` | hands over and leaves | `DIAL_MODE`: sequential or parallel |
+| `agent-stays-on-call` | stays on the call, muted | `DIAL_MODE`: sequential or parallel |
+| `sequential-with-updates` | stays on the call, muted | one at a time, Ava tells the resident about each one that does not pick up |
 
 ```powershell
 git switch main
-```
-
-```powershell
 git switch agent-stays-on-call
+git switch sequential-with-updates
 ```
 
-Restart the server after switching. `.env` and `reports/` are not tracked by git, so they stay as they are on both branches. `main` ignores `TWILIO_AGENT_APP_SID`.
+Restart the server after switching. `.env` and `reports/` are not tracked by git, so they stay as they are on every branch. `main` ignores `TWILIO_AGENT_APP_SID`. The ElevenLabs system prompt above is written for this branch; on the other two branches Ava never hears the technician-update cue, so the extra paragraph does nothing there.
 
 ## Files
 
+- [decision.md](decision.md): what was decided and why, open items, and how each change was checked. Update it with every design change
 - [server.js](server.js): entry point, loads `.env` and starts Express
 - [src/app.js](src/app.js): all endpoints and the call logic
 - [src/reports.js](src/reports.js): saved transfer records and the `/reports` pages

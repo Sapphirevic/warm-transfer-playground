@@ -38,18 +38,24 @@ function createReportStore(dir) {
 }
 
 // Turns the in-memory transfer into the record that is saved and shown.
-function buildReport(t, dialMode) {
+function buildReport(t) {
   const start = t.startedAt;
   const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
   const after = (ms) => (ms ? Math.round((ms - start) / 100) / 10 : null);
   const winner = t.winner === null ? null : t.techs[t.winner];
+  const periods = (list = []) => list.map((p) => ({ from: iso(p.from), to: iso(p.to) }));
+  // First start and last end, for a quick look (and for reports made before periods existed).
+  const firstFrom = (list = []) => iso(list.length ? list[0].from : null);
+  const lastTo = (list = []) => iso(list.length ? list.at(-1).to : null);
 
   return {
     resident_call_sid: t.residentCallSid,
     resident_number: t.residentNumber,
     direction: t.direction,
     summary: t.summary,
-    dial_mode: dialMode,
+    // Technicians are always called one at a time on this branch (kept so reports from
+    // other branches can be compared in the same list).
+    dial_mode: 'sequential',
     // This branch keeps Ava in the room; on main she leaves when the technician joins.
     transfer_style: 'agent stays on the call',
     started_at: iso(start),
@@ -58,12 +64,24 @@ function buildReport(t, dialMode) {
     result: t.result,
     connected_technician: t.result === 'connected' && winner ? winner.number : null,
     resident_wait_seconds: after(t.finishedAt),
-    // The resident hears hold music while technicians are being called.
-    hold_started_at: iso(t.holdStartedAt),
-    hold_ended_at: iso(t.holdEndedAt),
+    // The resident hears hold music while technicians are being called, with a break each
+    // time Ava tells them a technician did not pick up.
+    hold_started_at: firstFrom(t.holdPeriods),
+    hold_ended_at: lastTo(t.holdPeriods),
+    hold_periods: periods(t.holdPeriods),
     // Ava is muted (listening, not heard) during the hold and while the technician is in the room.
-    agent_muted_at: iso(t.agentMutedAt),
-    agent_unmuted_at: iso(t.agentUnmutedAt),
+    agent_muted_at: firstFrom(t.mutePeriods),
+    agent_unmuted_at: lastTo(t.mutePeriods),
+    agent_mute_periods: periods(t.mutePeriods),
+    // Each time a technician did not take the call and the next one was called, Ava was
+    // cued to tell the resident. `cue` is what Ava heard; the resident heard Ava's reply.
+    resident_updates: (t.residentUpdates || []).map((u) => ({
+      technician: u.tech + 1,
+      number: t.techs[u.tech].number,
+      cue: `Technician ${u.tech + 1} did not pick up. Calling technician ${u.tech + 2} now.`,
+      at: iso(u.at),
+      seconds_from_tool_call: after(u.at),
+    })),
     // Filled in from ElevenLabs after the call (see buildTranscript).
     transcript: t.transcript || null,
     technicians: t.techs.map((tech) => ({
@@ -243,14 +261,24 @@ function renderTranscript(r) {
     }[r.result];
     if (ending) rows.push({ at: r.finished_at, role: 'marker', text: ending });
   }
-  if (r.hold_started_at) rows.push({ at: r.hold_started_at, role: 'marker', text: 'Resident put on hold with music' });
-  if (r.hold_ended_at) rows.push({ at: r.hold_ended_at, role: 'marker', text: 'Resident taken off hold' });
-  if (r.agent_muted_at) rows.push({ at: r.agent_muted_at, role: 'marker', text: 'Ava muted: she keeps listening but nobody hears her' });
-  if (r.agent_unmuted_at) rows.push({ at: r.agent_unmuted_at, role: 'marker', text: 'Ava unmuted' });
+  // Reports from before periods existed only have one start and one end.
+  const holdPeriods = r.hold_periods || (r.hold_started_at ? [{ from: r.hold_started_at, to: r.hold_ended_at }] : []);
+  const mutePeriods = r.agent_mute_periods || (r.agent_muted_at ? [{ from: r.agent_muted_at, to: r.agent_unmuted_at }] : []);
+  for (const p of holdPeriods) {
+    rows.push({ at: p.from, role: 'marker', text: 'Resident put on hold with music' });
+    if (p.to) rows.push({ at: p.to, role: 'marker', text: 'Resident taken off hold' });
+  }
+  for (const p of mutePeriods) {
+    rows.push({ at: p.from, role: 'marker', text: 'Ava muted: she keeps listening but nobody hears her' });
+    if (p.to) rows.push({ at: p.to, role: 'marker', text: 'Ava unmuted' });
+  }
+  for (const u of r.resident_updates || []) {
+    rows.push({ at: u.at, role: 'marker', text: `Technician ${u.technician} (${u.number}) did not take the call: Ava cued to tell the resident` });
+  }
   rows.sort((a, b) => String(a.at || '9').localeCompare(String(b.at || '9')));
 
   // Anything the model "said" while its leg was muted was never heard on the call.
-  const whileMuted = (row) => Boolean(r.agent_muted_at && row.at && row.at >= r.agent_muted_at && (!r.agent_unmuted_at || row.at < r.agent_unmuted_at));
+  const whileMuted = (row) => Boolean(row.at && mutePeriods.some((p) => row.at >= p.from && (!p.to || row.at < p.to)));
 
   // ElevenLabs hears one audio stream, so once the technician is in the room it
   // cannot tell the resident and the technician apart.
@@ -290,6 +318,7 @@ function renderDetail(r) {
   <td>${time(tech.ringing_at)}<br>${seconds(s.ringing)}</td>
   <td>${time(tech.answered_at)}<br>${seconds(s.answered)}</td>
   <td>${time(tech.outcome_at)}<br>${seconds(s.outcome)}</td>
+  <td>${(r.resident_updates || []).some((u) => u.technician === i + 1) ? 'yes' : '-'}</td>
   <td>${dash(tech.answered_by)}</td>
   <td class="text">${dash(tech.detail)}</td>
   <td>${dash(tech.call_sid)}</td>
@@ -314,7 +343,7 @@ function renderDetail(r) {
 <h2>Technicians</h2>
 <p>Each time is shown with the seconds since the tool call underneath.</p>
 <div class="wrap"><table>
-<tr><th>#</th><th>Number</th><th>Outcome</th><th>Dialled</th><th>Ringing</th><th>Answered</th><th>Outcome at</th><th>Machine detection</th><th>Detail</th><th>Call SID</th></tr>
+<tr><th>#</th><th>Number</th><th>Outcome</th><th>Dialled</th><th>Ringing</th><th>Answered</th><th>Outcome at</th><th>Resident told</th><th>Machine detection</th><th>Detail</th><th>Call SID</th></tr>
 ${techRows.join('\n')}
 </table></div>
 

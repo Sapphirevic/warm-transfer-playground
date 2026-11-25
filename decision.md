@@ -1,0 +1,89 @@
+# Decision log
+
+What was decided, why, and what is still open. Newest entries at the top of each section.
+Update it whenever a design choice is made or changed, and in the same commit as the code.
+
+## Branches
+
+| Branch | Built on | What it is |
+| --- | --- | --- |
+| `main` | - | Ava hands the resident over to the technician and leaves. `DIAL_MODE` sequential or parallel. |
+| `agent-stays-on-call` | `main` | Resident, Ava and technician share one conference. Ava stays, muted while the technician is on. Hold music during the search. Transcripts in reports. |
+| `inbound-calls` | - | On the remote; not reviewed in this log yet. |
+| `sequential-with-updates` | `agent-stays-on-call` | Technicians called one at a time. Ava tells the resident each time one does not pick up. **Current working branch.** |
+
+## Decisions
+
+### 2026-11-25 - `sequential-with-updates` (v0.2.0)
+
+**D1. No parallel calling on this branch.**
+Technicians are called strictly one at a time, in `TECH_NUMBERS` order.
+Why: requested. A one-at-a-time search lets the resident be told about each technician who does not pick up, which parallel ringing cannot do.
+Code: `startSearch`, `resolveTech` in `src/app.js`; parallel branches removed.
+
+**D2. Ava herself gives the update, driven by her ElevenLabs system prompt.**
+The server plays a cue that only Ava hears. Her prompt tells her what to say.
+Options considered:
+- A text-to-speech clip in Ava's voice played by the server. Exact wording, but the AI conversation isn't the one speaking.
+- A second "wait for update" tool that blocks until the next search event. Most natural, but depends on ElevenLabs tool timeouts.
+- Twilio's built-in voice. Simplest, but robotic and not Ava.
+
+Chosen: the prompt-driven cue. Why: it is the same pattern the branch already uses for "A technician has joined the call", and the wording stays under the team's control in the prompt.
+
+**D3. The cue goes to Ava's call leg only, not the whole room.**
+`conferences(sid).participants(avaCallSid).update({ announceUrl })`. Why: so the resident hears one message, Ava's, and not a robot line followed by Ava repeating it.
+Not yet confirmed on a real call (see Open).
+
+**D4. Cue wording uses positions, never phone numbers.**
+"Technician N did not pick up. Calling technician N+1 now." Why: Ava has nothing private to read out.
+
+**D5. Every way of not taking the call gets the update, with the same wording.**
+That covers no answer, busy, voicemail, declined (pressed another key), no key after 3 prompts, and a call that could not be placed.
+Why: the resident does not need to know which one it was, and "declined" is not something to tell a resident.
+The **last** technician failing gets no update; the existing "No technician is available right now" flow replaces it.
+
+**D6. Hold music and mute around an update.**
+- Order: cue to Ava, then unmute Ava, then take the resident off hold, all while the cue plays. The resident hears about 3 seconds of silence before Ava speaks.
+- The music comes back, and Ava is muted again, `HOLD_MUSIC_RESUME_SEC` after the update (new setting, default 10 seconds). This only happens while the search is still running.
+- At most one pending "music on" per transfer. A new update replaces it, so the first hold cannot cut Ava off mid-update.
+- With `HOLD_MUSIC_DELAY_SEC=off`, only the cue is sent.
+
+**D7. Reports record time periods instead of single timestamps.**
+New fields: `hold_periods`, `agent_mute_periods` and `resident_updates`. The old `hold_started_at`, `hold_ended_at`, `agent_muted_at` and `agent_unmuted_at` are kept as the first start and the last end.
+Why: with updates, Ava is muted and unmuted several times in one search. Single timestamps overwrote each other, which would have mislabelled transcript lines as "muted, not heard". Old reports without periods still render.
+
+**D8. `DIAL_MODE` stays in `.env` with the value `sequential`.**
+This branch ignores the setting and prints a startup warning for any value other than `sequential`.
+`single` was considered and rejected: `.env` is shared by every branch (not tracked by git), and `main` and `agent-stays-on-call` refuse to start on any value other than `sequential` or `parallel`.
+
+**D9. ElevenLabs system prompt.**
+The tested prompt is in the README (Setup, step 4). It adds one exception to the "skip_turn after the tool call" rule: on hearing the cue, say "Sorry, technician N didn't pick up. I'm trying the next one now, please hold." once, then go back to skip_turn. It relies on the ElevenLabs skip_turn system tool being enabled.
+
+## Open
+
+- [ ] **First real call on this branch.** Check:
+  - The resident does **not** hear the cue (D3).
+  - Ava breaks out of skip_turn to give the update.
+  - `HOLD_MUSIC_RESUME_SEC=10` fits her sentence.
+
+  README test-checklist cases 8 and 8b cover these.
+- [ ] **Duplicate "no technician" message.** When the last technician fails, the room hears "No technician is available right now." in Twilio's voice, then Ava says nearly the same thing. This already happens on `agent-stays-on-call`.
+  - Proposed fix: send that cue to Ava's leg only, like D3.
+  - Trade-off: if Twilio refused the cue, the resident would hear nothing at that moment.
+  - Waiting for a decision.
+- [ ] **ngrok account.** Testing currently uses a colleague's ngrok authtoken and dev domain. Risks:
+  - Only one tunnel at a time on that account.
+  - Requests, including phone numbers, summaries and the `X-Tool-Secret` header, can be seen in their dashboard.
+  - The URL is theirs to change.
+
+  Recommendation: use our own free ngrok account. Waiting for a decision.
+- [ ] Local `.env`: change `DIAL_MODE=parallel` to `DIAL_MODE=sequential` (D8).
+- [ ] ElevenLabs: point the `request_transfer` tool URL at the current tunnel, paste the D9 prompt, enable skip_turn.
+
+## Verification log
+
+| Date | Change | How it was checked | Result |
+| --- | --- | --- | --- |
+| 2026-11-25 | D1-D8 | `npm test` (simulated Twilio and ElevenLabs, no network, no credit used) | 51/51 pass, 5 runs in a row |
+| 2026-11-25 | D1-D8 | Broke the feature on purpose 3 ways, re-ran tests, restored | No update call: 9 tests fail. Update does not cancel pending hold: 1 fails. Cue to whole room: 9 fail. Code restored and matched the backup exactly |
+| 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |

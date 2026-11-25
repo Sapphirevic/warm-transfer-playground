@@ -37,15 +37,24 @@ function loadConfig(env = process.env) {
     throw new Error(`These numbers are not E.164 (e.g. +15551234567): ${badNumbers.join(', ')}`);
   }
 
-  const dialMode = (env.DIAL_MODE || 'sequential').trim().toLowerCase();
-  if (!['sequential', 'parallel'].includes(dialMode)) {
-    throw new Error(`DIAL_MODE must be "sequential" or "parallel", got "${env.DIAL_MODE}"`);
+  // Technicians are always called one at a time on this branch. DIAL_MODE is no longer
+  // read; a leftover "parallel" only produces a startup warning so nobody thinks it applies.
+  const warnings = [];
+  const dialModeSetting = (env.DIAL_MODE || '').trim().toLowerCase();
+  if (dialModeSetting && dialModeSetting !== 'sequential') {
+    warnings.push(`DIAL_MODE=${env.DIAL_MODE.trim()} is ignored: technicians are always called one at a time on this branch. Set DIAL_MODE=sequential (valid on every branch) to silence this.`);
   }
 
   const holdSetting = (env.HOLD_MUSIC_DELAY_SEC || '5').trim().toLowerCase();
   const holdDelayMs = holdSetting === 'off' ? null : Number(holdSetting) * 1000;
   if (holdDelayMs !== null && !(holdDelayMs >= 0)) {
     throw new Error(`HOLD_MUSIC_DELAY_SEC must be a number of seconds or "off", got "${env.HOLD_MUSIC_DELAY_SEC}"`);
+  }
+
+  const resumeSetting = (env.HOLD_MUSIC_RESUME_SEC || '10').trim();
+  const holdResumeMs = Number(resumeSetting) * 1000;
+  if (!(holdResumeMs >= 0)) {
+    throw new Error(`HOLD_MUSIC_RESUME_SEC must be a number of seconds, got "${env.HOLD_MUSIC_RESUME_SEC}"`);
   }
 
   const publicBaseUrl = env.PUBLIC_BASE_URL.trim().replace(/\/+$/, '');
@@ -63,14 +72,18 @@ function loadConfig(env = process.env) {
     elevenLabsAgentId: env.ELEVENLABS_AGENT_ID.trim(),
     elevenLabsApiBase: (env.ELEVENLABS_API_BASE || 'https://api.elevenlabs.io').trim().replace(/\/+$/, ''),
     toolSecret: env.TOOL_SECRET.trim(),
+    // Called in this order, one at a time.
     techNumbers,
-    dialMode,
+    warnings,
     ringTimeoutSec: Number(env.RING_TIMEOUT_SEC) || 20,
     // TwiML App whose Voice URL is PUBLIC_BASE_URL/twilio/agent-leg. Ava joins the call through it.
     agentAppSid,
     // Hold music for the resident while technicians are called. It starts this long after
     // the tool call, so Ava can finish saying "please hold". null = no hold music.
     holdDelayMs,
+    // When a technician does not take the call, the resident comes off hold so Ava can tell
+    // them. This is how long after that the music starts again (and Ava is muted again).
+    holdResumeMs,
     holdMusicUrl: (env.HOLD_MUSIC_URL || 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical').trim(),
     // After a call ends, when to ask ElevenLabs for the transcript (it takes a moment to be ready).
     transcriptRetryMs: [5_000, 20_000, 60_000],

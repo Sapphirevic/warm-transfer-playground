@@ -6,6 +6,12 @@
 // register-call TwiML), and a technician who presses 1 simply joins the same room.
 // Nobody is moved, so Ava's conversation carries on while the technician is there.
 // While the technician is in the room Ava is muted: she listens but is not heard.
+//
+// Branch "sequential-with-updates": technicians are called strictly one at a time, in
+// TECH_NUMBERS order. When one does not take the call, the server plays a short cue to
+// Ava's leg only ("Technician 1 did not pick up. Calling technician 2 now."), takes the
+// resident off hold and unmutes Ava, so she can tell the resident in her own words.
+// HOLD_MUSIC_RESUME_SEC later the music comes back while the next technician is called.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -28,6 +34,10 @@ const ANNOUNCEMENTS = {
   joined: 'A technician has joined the call.',
   unavailable: 'No technician is available right now.',
 };
+// Played to Ava's leg only (the resident does not hear it) when technician i (0-based)
+// did not take the call and another one is about to be called. Ava's prompt reacts to it.
+// Numbers, not phone numbers, so Ava has nothing private to read out.
+const techUpdateLine = (i) => `Technician ${i + 1} did not pick up. Calling technician ${i + 2} now.`;
 const LOGGED_FIELDS = [
   'CallSid', 'ParentCallSid', 'CallStatus', 'Direction', 'From', 'To', 'AnsweredBy', 'MachineDetectionDuration',
   'Digits', 'StatusCallbackEvent', 'ConferenceSid', 'FriendlyName', 'ParticipantLabel', 'RecordingSid',
@@ -137,7 +147,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
   function saveReport(t) {
     try {
-      reports.save(buildReport(t, config.dialMode));
+      reports.save(buildReport(t));
     } catch (err) {
       log(`ERROR could not save report for resident=${t.residentCallSid}: ${err.message}`);
     }
@@ -204,6 +214,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     if (t.result) return;
     t.result = result;
     t.finishedAt = at;
+    clearTimeout(t.holdTimer); // no more hold music once the search is over
     saveReport(t);
 
     const outcomes = t.techs
@@ -213,7 +224,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const who = result === 'connected' ? ` technician=${t.techs[t.winner].number}` : '';
     log(
       `TRANSFER ${result.toUpperCase()} resident=${t.residentNumber} call=${t.residentCallSid}${who} ` +
-        `waited=${secs(t.startedAt, at)} mode=${config.dialMode} tried=[${outcomes || 'nobody'}] report=/reports/${t.residentCallSid}`
+        `waited=${secs(t.startedAt, at)} tried=[${outcomes || 'nobody'}] report=/reports/${t.residentCallSid}`
     );
   }
 
@@ -352,6 +363,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       try {
         await client.conferences(resident.conferenceSid).participants(agent.callSid).update({ muted });
         log(`AGENT Ava ${muted ? 'muted' : 'unmuted'} in ${roomName(residentCallSid)} (${why})`);
+        recordPeriod(residentCallSid, 'mutePeriods', muted);
         return true;
       } catch (err) {
         agent.muted = !muted;
@@ -359,6 +371,19 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         return false;
       }
     });
+  }
+
+  // Ava can be muted and unmuted, and the resident put on hold and taken off it, several
+  // times in one search (once per technician update). Each change that Twilio accepted
+  // opens or closes a period on the transfer, so the report knows exactly when.
+  function recordPeriod(residentCallSid, field, on) {
+    const t = transfers.get(residentCallSid);
+    if (!t) return;
+    const periods = t[field];
+    const open = periods.at(-1);
+    if (on && !(open && open.to === null)) periods.push({ from: Date.now(), to: null });
+    else if (!on && open && open.to === null) open.to = Date.now();
+    saveReport(t);
   }
 
   // Changes to one room (hold, mute, announcements) are sent to Twilio one after
@@ -381,6 +406,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       try {
         await client.conferences(resident.conferenceSid).participants(residentCallSid).update(options);
         log(`HOLD resident=${residentCallSid} ${hold ? 'on hold with music' : 'off hold'} (${why})`);
+        recordPeriod(residentCallSid, 'holdPeriods', hold);
         return true;
       } catch (err) {
         resident.onHold = !hold;
@@ -391,24 +417,24 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   }
 
   // A few seconds after Ava asks for a technician (long enough for her to say
-  // "please hold"), the resident gets music and Ava is muted until the search ends.
+  // "please hold"), and again a few seconds after each technician update, the resident
+  // gets music and Ava is muted. Only while the search is still running.
   function startHold(t) {
+    t.holdTimer = null;
     if (t.status !== 'searching') return;
-    const stamp = (field) => (changed) => {
-      if (!changed) return;
-      t[field] = Date.now();
-      saveReport(t);
-    };
-    setResidentHold(t.residentCallSid, true, 'searching for a technician').then(stamp('holdStartedAt'));
-    setAgentMuted(t.residentCallSid, true, 'resident is on hold').then(stamp('agentMutedAt'));
+    setResidentHold(t.residentCallSid, true, 'searching for a technician');
+    setAgentMuted(t.residentCallSid, true, 'resident is on hold');
+  }
+
+  // There is at most one pending "music on" per transfer: a new one replaces the old.
+  function scheduleHold(t, delayMs) {
+    clearTimeout(t.holdTimer);
+    t.holdTimer = setTimeout(() => startHold(t), delayMs);
+    t.holdTimer.unref();
   }
 
   function endHold(t, why) {
-    return setResidentHold(t.residentCallSid, false, why).then((released) => {
-      if (!released) return;
-      t.holdEndedAt = Date.now();
-      saveReport(t);
-    });
+    return setResidentHold(t.residentCallSid, false, why);
   }
 
   // Plays a short line (or public/connecting.mp3) to everyone in the room.
@@ -426,10 +452,44 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   app.post('/conference/announce', twilioHook, (req, res) => {
     const kind = req.query.kind;
     const vr = new VoiceResponse();
-    if (kind === 'joined' && fs.existsSync(connectingFile)) vr.play(`${base}/public/connecting.mp3`);
+    const tech = Number.parseInt(req.query.tech, 10);
+    if (kind === 'tech-update' && tech >= 0) vr.say(techUpdateLine(tech));
+    else if (kind === 'joined' && fs.existsSync(connectingFile)) vr.play(`${base}/public/connecting.mp3`);
     else vr.say(ANNOUNCEMENTS[kind] || ANNOUNCEMENTS.joined);
     sendTwiml(res, vr);
   });
+
+  // Technician i did not take the call and technician i+1 is about to be called.
+  // The cue goes to Ava's leg only: the resident never hears it, they hear Ava say it.
+  //   1. cue to Ava ("Technician 1 did not pick up. Calling technician 2 now.")
+  //   2. Ava unmuted and the resident taken off hold, while the cue is still playing,
+  //      so both are ready by the time she answers it
+  //   3. HOLD_MUSIC_RESUME_SEC later: music on and Ava muted again, unless the search
+  //      has ended by then (a technician accepted, or nobody is left)
+  function updateResident(t, i) {
+    const resident = residentCalls.get(t.residentCallSid);
+    if (!resident || resident.ended || !resident.conferenceSid) return;
+    const { agent } = resident;
+    if (agent.state !== 'in' || !agent.callSid) {
+      log(`UPDATE skipped for tech#${i}: Ava is not in ${roomName(t.residentCallSid)} to tell the resident`);
+      return;
+    }
+
+    clearTimeout(t.holdTimer); // the music must not start while she is speaking
+    t.holdTimer = null;
+    const at = Date.now();
+    t.residentUpdates.push({ tech: i, at });
+    saveReport(t);
+
+    inOrder(resident, () => client.conferences(resident.conferenceSid).participants(agent.callSid)
+      .update({ announceUrl: `${base}/conference/announce?kind=tech-update&tech=${i}`, announceMethod: 'POST' })
+      .then(() => log(`UPDATE cue to Ava "${techUpdateLine(i)}" in ${roomName(t.residentCallSid)} +${secs(t.startedAt, at)} after tool call`))
+      .catch((err) => log(`ERROR could not send the technician update cue to Ava in ${roomName(t.residentCallSid)}: ${twilioError(err)}`)));
+    setAgentMuted(t.residentCallSid, false, `telling the resident technician ${i + 1} did not pick up`);
+    endHold(t, `Ava is telling the resident technician ${i + 1} did not pick up`);
+
+    if (config.holdDelayMs !== null) scheduleHold(t, config.holdResumeMs);
+  }
 
   // ---------------------------------------------------------------- technician calls
 
@@ -469,15 +529,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     });
   }
 
+  // One technician at a time, in TECH_NUMBERS order.
   function startSearch(t) {
-    log(`SEARCH start resident=${t.residentCallSid} mode=${config.dialMode} techs=${t.techs.map((x) => x.number).join(',')}`);
-    if (config.dialMode === 'parallel') {
-      // One separate call per technician (not one <Dial> with several <Number>s),
-      // so a voicemail picking up can only ever fail its own leg.
-      t.techs.forEach((_, i) => dialTech(t, i));
-    } else {
-      dialNext(t);
-    }
+    log(`SEARCH start resident=${t.residentCallSid} one at a time techs=${t.techs.map((x) => x.number).join(',')}`);
+    dialNext(t);
   }
 
   function dialNext(t) {
@@ -538,15 +593,13 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   }
 
   // Same, for outcomes that mean "this technician is not taking it": moves the search on.
+  // Every such outcome (no answer, busy, voicemail, declined, failed) gets the same update
+  // to the resident; the last technician failing goes to "no technician" instead.
   function resolveTech(t, i, outcome, detail) {
     if (!setOutcome(t, i, outcome, detail)) return;
-    if (t.status !== 'searching') return;
-
-    if (config.dialMode === 'parallel') {
-      if (t.techs.every((tech) => tech.outcome)) allFailed(t);
-    } else if (i === t.cursor) {
-      dialNext(t);
-    }
+    if (t.status !== 'searching' || i !== t.cursor) return;
+    if (i + 1 < t.techs.length) updateResident(t, i);
+    dialNext(t);
   }
 
   // Nobody took it. Ava is normally still in the room, so she is told by an
@@ -561,11 +614,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     // The resident goes back to talking with Ava: music off, Ava's voice back on.
     endHold(t, 'no technician available');
     if (resident.agent.state === 'in' || resident.agent.state === 'joining') {
-      setAgentMuted(t.residentCallSid, false, 'no technician available').then((unmuted) => {
-        if (!unmuted) return;
-        t.agentUnmutedAt = Date.now();
-        saveReport(t);
-      });
+      setAgentMuted(t.residentCallSid, false, 'no technician available');
       announce(t.residentCallSid, 'unavailable');
     } else {
       log(`AGENT Ava is not in the room, bringing her back for resident=${t.residentCallSid}`);
@@ -718,6 +767,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         outcomeAt: null,
       })),
       timings: {},
+      holdTimer: null, //      pending "music on" (see scheduleHold)
+      holdPeriods: [], //      [{ from, to }] resident on hold music
+      mutePeriods: [], //      [{ from, to }] Ava muted
+      residentUpdates: [], //  [{ tech, at }] "technician N did not pick up" cues sent to Ava
     };
     transfers.set(callSid, t);
     timing(t, 'tool_call');
@@ -729,17 +782,23 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       : 'Say one short sentence asking the resident to hold while you connect them with a technician, then say nothing more. ' +
         `Hold music starts for the resident in about ${Math.round(holdDelayMs / 1000)} seconds and they cannot hear you while it plays. `;
 
+    const afterUpdate = holdDelayMs === null
+      ? 'then keep talking with them while the next technician is called. '
+      : 'then say nothing more: the hold music comes back a few seconds later. ';
+
     // Answer the tool straight away; the search carries on after this response.
     res.json({
       status: 'searching',
       message:
-        `Searching for a technician now. ${whileSearching}` +
-        `You stay on the call. When you hear "${ANNOUNCEMENTS.joined}", a technician is talking with the resident: say nothing at all from then on, do not introduce anyone and do not answer, even if spoken to. ` +
+        `Searching for a technician now. Technicians are called one at a time. ${whileSearching}` +
+        `You stay on the call. If you hear "Technician 1 did not pick up. Calling technician 2 now." (or the same with other numbers), the resident can hear you: ` +
+        `tell them in one short sentence that technician 1 did not pick up and you are now trying the next one, ${afterUpdate}` +
+        `When you hear "${ANNOUNCEMENTS.joined}", a technician is talking with the resident: say nothing at all from then on, do not introduce anyone and do not answer, even if spoken to. ` +
         `If you hear "${ANNOUNCEMENTS.unavailable}", the resident can hear you again: apologise and offer to take a message.`,
     });
     setImmediate(() => startSearch(t));
     // Give Ava time to say "please hold" before the music replaces her.
-    if (holdDelayMs !== null) setTimeout(() => startHold(t), holdDelayMs).unref();
+    if (holdDelayMs !== null) scheduleHold(t, holdDelayMs);
   });
 
   // ---------------------------------------------------------------- technician legs
@@ -823,8 +882,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       return sayAndHangup(res, 'Okay. Goodbye.');
     }
 
-    // The lock. Node handles one request at a time and there is no await between
-    // this check and the assignment below, so only one technician can get through.
+    // The lock. Only one technician is called at a time, but a key press can still arrive
+    // after the search has ended (resident hung up, or a stale call). Node handles one
+    // request at a time and there is no await between this check and the assignment.
     const resident = residentCalls.get(t.residentCallSid);
     const gone = t.status === 'cancelled' || !resident || resident.ended;
     if (gone || t.status !== 'searching' || tech.outcome) {
@@ -922,11 +982,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         finish(t, 'connected', t.timings.technician_joined);
         // Silence Ava, stop the resident's hold music, then tell the room. In this order
         // nobody hears Ava react to the announcement and the resident does not miss it.
-        setAgentMuted(residentCallSid, true, 'technician joined').then((muted) => {
-          if (!muted) return;
-          t.agentMutedAt = Date.now();
-          saveReport(t);
-        });
+        setAgentMuted(residentCallSid, true, 'technician joined');
         endHold(t, 'technician joined');
         announce(residentCallSid, 'joined');
       }
@@ -938,12 +994,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       if (who === 'agent') resident.agent.state = 'left';
       if (who === 'technician') {
         // The resident is alone with Ava again, so she needs her voice back.
-        setAgentMuted(residentCallSid, false, 'technician left').then((unmuted) => {
-          if (unmuted) {
-            t.agentUnmutedAt = Date.now();
-            saveReport(t);
-          }
-        });
+        setAgentMuted(residentCallSid, false, 'technician left');
       }
       if (who === 'resident') residentGone(residentCallSid, 'left the room');
       else endIfResidentAlone(residentCallSid);
@@ -984,4 +1035,4 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   return { app, state: { residentCalls, transfers } };
 }
 
-module.exports = { createApp, FALLBACK_FIRST_MESSAGE, ANNOUNCEMENTS };
+module.exports = { createApp, FALLBACK_FIRST_MESSAGE, ANNOUNCEMENTS, techUpdateLine };

@@ -1,6 +1,6 @@
 'use strict';
 
-// Branch "agent-stays-on-call".
+// Branch "sequential-with-updates" (built on "agent-stays-on-call").
 // Simulates Twilio's webhooks against the real Express app with a fake Twilio
 // REST client, so the call logic can be checked without placing calls.
 // Requests are signed for PUBLIC_BASE_URL but sent to localhost, which is the
@@ -12,7 +12,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const twilio = require('twilio');
-const { createApp, FALLBACK_FIRST_MESSAGE } = require('../src/app');
+const { createApp, FALLBACK_FIRST_MESSAGE, techUpdateLine } = require('../src/app');
+const { loadConfig } = require('../src/config');
 
 const AUTH_TOKEN = 'test-auth-token';
 const PUBLIC = 'https://playground.example.test';
@@ -29,7 +30,8 @@ const FORGED = 'bm90LWEtcmVhbC1zaWduYXR1cmU=';
 const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 // holdDelayMs: null = no hold music (most tests), a number = music starts that long after the tool call.
-async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null } = {}) {
+// holdResumeMs: how long after a "technician did not pick up" update the music comes back.
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40 } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const agentLegs = []; //      conferences(sid).participants.create(...) -> Ava joining
@@ -40,7 +42,8 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
   const answeredMeanwhile = new Set(); // call SIDs that report in-progress when we try to cancel them
   const mutes = []; //          conferences(sid).participants(callSid).update(...) -> muting Ava
   const holds = []; //          same call with "hold" -> the resident's hold music
-  const roomActions = []; //    mutes, announcements and room endings, in the order they were sent
+  const agentCues = []; //      conferences(sid).participants(callSid).update({ announceUrl }) -> cue to one leg
+  const roomActions = []; //    mutes, holds, announcements and room endings, in the order they were sent
   const flags = { failAgentAdd: false, failRegister: false, failConversations: false, failMute: false };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-transfer-test-'));
   // Stand-in for the ElevenLabs conversations API: what it would return for a call.
@@ -74,6 +77,12 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
     // ...and with "hold" it puts one participant on hold music or takes them off it.
     const participants = (callSid) => ({
       update: async (options) => {
+        if ('announceUrl' in options) {
+          const url = new URL(options.announceUrl);
+          roomActions.push(`cue:${url.searchParams.get('kind')}:${url.searchParams.get('tech')}`);
+          agentCues.push({ conferenceSid: sid, callSid, ...options });
+          return { callSid };
+        }
         if ('hold' in options) {
           roomActions.push(`hold:${options.hold}`);
           holds.push({ conferenceSid: sid, callSid, ...options });
@@ -107,10 +116,11 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
     twilioPhoneNumber: TWILIO_NUMBER,
     toolSecret: TOOL_SECRET,
     techNumbers,
-    dialMode,
+    warnings: [],
     ringTimeoutSec: 20,
     agentAppSid: APP_SID,
     holdDelayMs,
+    holdResumeMs,
     holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
     transcriptRetryMs: [5],
     reportsDir: path.join(tmp, 'reports'),
@@ -228,7 +238,7 @@ async function setup({ dialMode = 'sequential', techNumbers = ['+15550000001', '
   };
 
   return {
-    config, state, created, updates, agentLegs, roomUpdates, mutes, holds, roomActions, registered, logs, failUpdatesFor, answeredMeanwhile, flags, elevenLabs,
+    config, state, created, updates, agentLegs, roomUpdates, mutes, holds, agentCues, roomActions, registered, logs, failUpdatesFor, answeredMeanwhile, flags, elevenLabs,
     hook, json, get, room, avaJoins, avaLeaves, residentIsWithAva, residentAsksForTransfer, tech, techAcceptsAndJoins,
     techCalls, endedWith, announcements, roomEnded, transfer, outcomes, report, close,
   };
@@ -506,7 +516,7 @@ test('hold music: shortly after the tool call the resident hears music and Ava i
 });
 
 test('hold music: when nobody is available the music stops and Ava gets her voice back before the announcement', async (t) => {
-  const s = await setup({ holdDelayMs: 10 });
+  const s = await setup({ holdDelayMs: 10, holdResumeMs: 500 });
   t.after(s.close);
   await s.residentAsksForTransfer();
   await tick();
@@ -516,11 +526,25 @@ test('hold music: when nobody is available the music stops and Ava gets her voic
   await s.tech(1).status('no-answer');
   await tick();
 
-  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'hold:false', 'mute:false', 'announce:unavailable']);
+  // Technician 1 failing gives the update (music off, Ava's voice back); technician 2
+  // failing is the end of the list, so "no technician" with nothing left to undo.
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'announce:unavailable']);
   const report = s.report();
   assert.equal(report.result, 'no technician');
   assert.ok(report.hold_ended_at);
   assert.ok(report.agent_unmuted_at);
+});
+
+test('hold music, one technician only: nobody to update about, so it goes straight to "no technician"', async (t) => {
+  const s = await setup({ holdDelayMs: 10, techNumbers: ['+15550000001'] });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await tick();
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'hold:false', 'mute:false', 'announce:unavailable']);
+  assert.deepEqual(s.agentCues, []);
 });
 
 test('hold music: not started if the search is already over, and can be switched off', async (t) => {
@@ -781,78 +805,311 @@ test('resident hangs up while a technician is listening to the brief: that call 
   assert.equal(s.report().result, 'resident hung up');
 });
 
-// ---------------------------------------------------------------- parallel mode
+// ---------------------------------------------------------------- one at a time, with updates
 
-test('parallel: winner cancels the others at once, canceled for ringing calls and completed for answered ones', async (t) => {
-  const s = await setup({ dialMode: 'parallel', techNumbers: ['+15550000001', '+15550000002', '+15550000003'] });
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('one at a time: only one technician call ever exists, in TECH_NUMBERS order', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'] });
   t.after(s.close);
   await s.residentAsksForTransfer();
-  assert.equal(s.techCalls().length, 3, 'one separate call per technician');
 
-  await s.tech(0).status('ringing'); //  still ringing when someone wins
-  await s.tech(1).answered(); //         both of these are listening to the brief
-  await s.tech(2).answered();
-  const [a, b] = await Promise.all([s.tech(1).press('1'), s.tech(2).press('1')]);
+  assert.deepEqual(s.techCalls().map((c) => c.to), ['+15550000001'], 'only the first is dialled');
+  await s.tech(0).status('ringing');
   await tick();
-
-  const winners = [a, b].filter((r) => /<Conference/.test(r.text));
-  const losers = [a, b].filter((r) => /Another technician has already taken this call/.test(r.text));
-  assert.equal(winners.length, 1, 'exactly one technician wins the lock');
-  assert.equal(losers.length, 1);
-
-  const winner = s.transfer().winner;
-  const loser = winner === 1 ? 2 : 1;
-  assert.deepEqual(s.endedWith(s.tech(0).sid()), ['canceled'], 'ringing technician: canceled');
-  assert.deepEqual(s.endedWith(s.tech(loser).sid()), ['completed'], 'answered technician: completed');
-  assert.deepEqual(s.endedWith(s.tech(winner).sid()), [], 'winner is not hung up');
-
-  const expected = [];
-  expected[0] = 'canceled';
-  expected[winner] = 'accepted';
-  expected[loser] = 'canceled';
-  assert.deepEqual(s.outcomes(), expected);
-  for (const i of [0, loser]) {
-    assert.ok(s.logs.some((line) => line.includes(`CANCEL tech#${i}`) && line.includes('another technician accepted')), `cancellation of tech#${i} is logged`);
-  }
+  assert.equal(s.techCalls().length, 1, 'ringing does not dial anyone else');
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.techCalls().map((c) => c.to), ['+15550000001', '+15550000002']);
+  await s.tech(1).status('busy');
+  await tick();
+  assert.deepEqual(s.techCalls().map((c) => c.to), ['+15550000001', '+15550000002', '+15550000003']);
+  assert.equal(s.report().dial_mode, 'sequential');
 });
 
-test('cancel: a call picked up while we were cancelling is ended with completed, and Twilio errors are logged', async (t) => {
-  const s = await setup({ dialMode: 'parallel', techNumbers: ['+15550000001', '+15550000002', '+15550000003'] });
+test('update: technician 1 does not pick up -> Ava alone hears the cue, the next technician is dialled', async (t) => {
+  const s = await setup();
   t.after(s.close);
-  await s.residentAsksForTransfer();
+  const reply = await s.residentAsksForTransfer();
+  assert.match(reply.body.message, /If you hear "Technician 1 did not pick up\. Calling technician 2 now\."/, 'the tool reply tells Ava what the cue means');
+  assert.match(reply.body.message, /tell them in one short sentence that technician 1 did not pick up and you are now trying the next one/);
 
   await s.tech(0).status('ringing');
-  await s.tech(1).status('ringing');
-  s.answeredMeanwhile.add(s.tech(0).sid()); // Twilio ignores "canceled": the call is already in progress
-  s.failUpdatesFor.add(s.tech(1).sid()); //    Twilio rejects every update for this call
-
-  await s.tech(2).answered();
-  await s.tech(2).press('1');
+  await s.tech(0).status('no-answer');
   await tick();
 
-  assert.deepEqual(s.endedWith(s.tech(0).sid()), ['canceled', 'completed']);
-  assert.deepEqual(s.endedWith(s.tech(1).sid()), ['canceled', 'completed'], 'falls back to completed after an error');
-  const errors = s.logs.filter((line) => line.includes('ERROR cancel tech#1'));
-  assert.equal(errors.length, 2);
-  assert.ok(errors[0].includes('Twilio error 21220'));
+  // The cue goes to Ava's leg only, not to the whole room.
+  assert.equal(s.agentCues.length, 1);
+  const cue = s.agentCues[0];
+  assert.equal(cue.conferenceSid, CONFERENCE);
+  assert.equal(cue.callSid, s.agentLegs[0].callSid, "it is Ava's leg that hears it");
+  assert.equal(cue.announceUrl, `${PUBLIC}/conference/announce?kind=tech-update&tech=0`);
+  assert.deepEqual(s.announcements(), [], 'nothing is announced to the room, so the resident does not hear the cue');
+  // Hold music is off in this test: nothing to stop, and Ava was never muted.
+  assert.deepEqual(s.roomActions, ['cue:tech-update:0']);
+
+  // What Twilio plays to Ava when it fetches the cue.
+  const spoken = await s.hook('/conference/announce?kind=tech-update&tech=0', { ConferenceSid: CONFERENCE });
+  assert.match(spoken.text, /<Say>Technician 1 did not pick up\. Calling technician 2 now\.<\/Say>/);
+  assert.equal(techUpdateLine(0), 'Technician 1 did not pick up. Calling technician 2 now.');
+  assert.doesNotMatch(spoken.text, /\+1555/, 'no phone numbers for Ava to read out');
+
+  assert.deepEqual(s.techCalls().map((c) => c.to), ['+15550000001', '+15550000002'], 'the next technician is dialled straight away');
+  assert.equal(s.transfer().status, 'searching');
+
+  const report = s.report();
+  assert.equal(report.resident_updates.length, 1);
+  assert.equal(report.resident_updates[0].technician, 1);
+  assert.equal(report.resident_updates[0].number, '+15550000001');
+  assert.equal(report.resident_updates[0].cue, 'Technician 1 did not pick up. Calling technician 2 now.');
+  assert.equal(typeof report.resident_updates[0].seconds_from_tool_call, 'number');
+  assert.ok(s.logs.some((line) => line.includes('UPDATE cue to Ava "Technician 1 did not pick up.')));
+
+  // Technician 2 takes it: the normal join, no further update.
+  await s.techAcceptsAndJoins(1);
+  assert.equal(s.report().result, 'connected');
+  assert.equal(s.agentCues.length, 1);
 });
 
-test('parallel: voicemail does not win, and "no technician" only after every technician has failed', async (t) => {
-  const s = await setup({ dialMode: 'parallel' });
+test('update: every way of not taking the call gets it (busy, voicemail, declined, no key, could not dial); the last one does not', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003', '+15550000004', '+15550000005', '+15550000006'] });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+
+  await s.tech(0).status('busy');
+  await tick();
+  await s.tech(1).answered();
+  await s.tech(1).amd('machine_start');
+  await tick();
+  await s.tech(2).answered();
+  await s.tech(2).press('2');
+  await tick();
+  await s.tech(3).answered();
+  await s.tech(3).answered(4); // no key after 3 prompts
+  await tick();
+  await s.tech(4).status('failed');
+  await tick();
+  await s.tech(5).status('no-answer'); // the last one: "no technician", not an update
+  await tick();
+
+  assert.deepEqual(s.outcomes(), ['busy', 'voicemail', 'declined', 'declined', 'failed', 'no-answer']);
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('tech')), ['0', '1', '2', '3', '4']);
+  assert.deepEqual(s.announcements(), ['unavailable']);
+  assert.deepEqual(s.report().resident_updates.map((u) => u.technician), [1, 2, 3, 4, 5]);
+});
+
+test('update: a late status for an earlier technician does not repeat the update or skip anyone', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'] });
   t.after(s.close);
   await s.residentAsksForTransfer();
 
   await s.tech(0).answered();
-  await s.tech(0).amd('machine_start');
+  await s.tech(0).press('2');
   await tick();
-  assert.equal(s.transfer().status, 'searching', 'the other technician can still accept');
-  assert.deepEqual(s.announcements(), []);
+  await s.tech(0).status('completed'); // the declined call finishing afterwards
+  await tick();
 
-  await s.tech(1).status('busy');
+  assert.equal(s.agentCues.length, 1);
+  assert.equal(s.techCalls().length, 2, 'technician 3 is not dialled');
+});
+
+test('update with hold music: music off and Ava unmuted for the update, back on HOLD_MUSIC_RESUME_SEC later', async (t) => {
+  const s = await setup({ holdDelayMs: 10, holdResumeMs: 150, techNumbers: ['+15550000001', '+15550000002', '+15550000003'] });
+  t.after(s.close);
+  const reply = await s.residentAsksForTransfer();
+  assert.match(reply.body.message, /the hold music comes back a few seconds later/);
   await tick();
-  assert.equal(s.transfer().status, 'failed');
-  assert.deepEqual(s.outcomes(), ['voicemail', 'busy']);
-  assert.deepEqual(s.announcements(), ['unavailable']);
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true']);
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  // Cue to Ava first, then she gets her voice back and the music stops, while the cue plays.
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false']);
+  assert.equal(s.mutes.at(-1).callSid, s.agentLegs[0].callSid);
+  assert.equal(s.holds.at(-1).callSid, RESIDENT);
+
+  await wait(200);
+  assert.deepEqual(s.roomActions.slice(5), ['hold:true', 'mute:true'], 'music back and Ava muted again for the next technician');
+
+  // Same again for technician 2.
+  await s.tech(1).status('busy');
+  await wait(200);
+  assert.deepEqual(s.roomActions.slice(7), ['cue:tech-update:1', 'mute:false', 'hold:false', 'hold:true', 'mute:true']);
+
+  const report = s.report();
+  assert.equal(report.hold_periods.length, 3);
+  assert.equal(report.agent_mute_periods.length, 3);
+  assert.ok(report.hold_periods.slice(0, 2).every((p) => p.from && p.to && p.to >= p.from), 'the first two holds were ended by the updates');
+  assert.equal(report.hold_periods[2].to, null, 'still on hold for technician 3');
+  assert.equal(report.hold_started_at, report.hold_periods[0].from);
+  assert.equal(report.hold_ended_at, null);
+
+  // Technician 3 joins: music off, Ava stays muted, room told.
+  await s.techAcceptsAndJoins(2);
+  assert.deepEqual(s.roomActions.slice(12), ['hold:false', 'announce:joined']);
+  assert.equal(s.report().agent_mute_periods.at(-1).to, null, 'Ava stays muted with the technician on');
+});
+
+test('update with hold music: a technician accepting before the music returns stops it from coming back', async (t) => {
+  const s = await setup({ holdDelayMs: 10, holdResumeMs: 200 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await tick();
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  await s.techAcceptsAndJoins(1); // well within the 200 ms
+  await wait(250);
+
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'mute:true', 'announce:joined']);
+});
+
+test('update with hold music: an update before the first hold replaces it, so the music cannot cut Ava off', async (t) => {
+  // The first hold is due 100 ms after the tool call; the update comes first and asks for 250 ms.
+  const s = await setup({ holdDelayMs: 100, holdResumeMs: 250 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+
+  await s.tech(0).status('failed'); // e.g. an unverified number fails at once
+  await wait(150); // past the original 100 ms
+  assert.deepEqual(s.roomActions, ['cue:tech-update:0'], 'the original hold did not fire while Ava is speaking');
+  await wait(200);
+  assert.deepEqual(s.roomActions, ['cue:tech-update:0', 'hold:true', 'mute:true']);
+});
+
+test('update with hold music: the last technician failing straight after an update gives "no technician", and the music stays off', async (t) => {
+  const s = await setup({ holdDelayMs: 10, holdResumeMs: 200 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await tick();
+
+  await s.tech(0).status('busy');
+  await tick();
+  await s.tech(1).status('no-answer');
+  await wait(250); // past the time the music would have come back
+
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'announce:unavailable']);
+  assert.equal(s.report().result, 'no technician');
+});
+
+test('update: skipped when Ava is not in the room, and the search carries on', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.avaLeaves();
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.agentCues, []);
+  assert.equal(s.techCalls().length, 2);
+  assert.ok(s.logs.some((line) => line.includes('UPDATE skipped for tech#0')));
+  assert.deepEqual(s.report().resident_updates, []);
+});
+
+test('update: no cue after the resident has hung up', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.room('participant-leave', { CallSid: RESIDENT });
+
+  await s.tech(0).status('canceled');
+  await tick();
+  assert.deepEqual(s.agentCues, []);
+  assert.equal(s.techCalls().length, 1);
+});
+
+test('cancel: a ringing call picked up while we were cancelling is ended with completed, and Twilio errors are logged', async (t) => {
+  // Picked up in the moment we sent "canceled".
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.tech(0).status('ringing');
+  s.answeredMeanwhile.add(s.tech(0).sid());
+  await s.room('participant-leave', { CallSid: RESIDENT });
+  assert.deepEqual(s.endedWith(s.tech(0).sid()), ['canceled', 'completed']);
+
+  // Twilio rejects every update for the call.
+  const other = await setup();
+  t.after(other.close);
+  await other.residentAsksForTransfer();
+  await other.tech(0).status('ringing');
+  other.failUpdatesFor.add(other.tech(0).sid());
+  await other.room('participant-leave', { CallSid: RESIDENT });
+  assert.deepEqual(other.endedWith(other.tech(0).sid()), ['canceled', 'completed'], 'falls back to completed after an error');
+  const errors = other.logs.filter((line) => line.includes('ERROR cancel tech#0'));
+  assert.equal(errors.length, 2);
+  assert.ok(errors[0].includes('Twilio error 21220'));
+});
+
+test('config: DIAL_MODE=parallel only warns, and HOLD_MUSIC_RESUME_SEC is read and checked', () => {
+  const env = {
+    TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`,
+    TWILIO_AUTH_TOKEN: 'x',
+    TWILIO_PHONE_NUMBER: TWILIO_NUMBER,
+    ELEVENLABS_API_KEY: 'x',
+    ELEVENLABS_AGENT_ID: 'agent_x',
+    TECH_NUMBERS: '+15550000001, +15550000002',
+    PUBLIC_BASE_URL: PUBLIC,
+    TOOL_SECRET: 'x',
+    TWILIO_AGENT_APP_SID: APP_SID,
+  };
+  const plain = loadConfig(env);
+  assert.deepEqual(plain.warnings, []);
+  assert.equal(plain.holdResumeMs, 10_000, 'default 10 seconds');
+  assert.equal('dialMode' in plain, false);
+  assert.deepEqual(plain.techNumbers, ['+15550000001', '+15550000002']);
+
+  assert.deepEqual(loadConfig({ ...env, DIAL_MODE: 'sequential' }).warnings, []);
+  const parallel = loadConfig({ ...env, DIAL_MODE: 'parallel' });
+  assert.equal(parallel.warnings.length, 1);
+  assert.match(parallel.warnings[0], /DIAL_MODE=parallel is ignored/);
+
+  assert.equal(loadConfig({ ...env, HOLD_MUSIC_RESUME_SEC: '7.5' }).holdResumeMs, 7_500);
+  assert.throws(() => loadConfig({ ...env, HOLD_MUSIC_RESUME_SEC: 'soon' }), /HOLD_MUSIC_RESUME_SEC must be a number/);
+});
+
+test('transcript: with several mute periods, only Ava lines inside a period are marked "muted, not heard"', () => {
+  const { renderDetail } = require('../src/reports');
+  const at = (s) => new Date(Date.UTC(2026, 10, 25, 10, 0, s)).toISOString();
+  // Tool call at 10:00:00, which ElevenLabs logs at 30s into the conversation (conversation start 09:59:30).
+  const report = {
+    resident_call_sid: RESIDENT,
+    resident_number: RESIDENT_NUMBER,
+    started_at: at(0),
+    finished_at: at(60),
+    result: 'connected',
+    connected_technician: '+15550000002',
+    transfer_style: 'agent stays on the call',
+    technicians: [{ number: '+15550000001', outcome: 'no-answer' }, { number: '+15550000002', outcome: 'accepted' }],
+    hold_periods: [{ from: at(5), to: at(25) }, { from: at(35), to: at(60) }],
+    agent_mute_periods: [{ from: at(5), to: at(25) }, { from: at(35), to: null }],
+    resident_updates: [{ technician: 1, number: '+15550000001', cue: techUpdateLine(0), at: at(25), seconds_from_tool_call: 25 }],
+    transcript: {
+      status: 'final',
+      conversations: [{
+        conversation_id: 'c1',
+        status: 'done',
+        started_at: new Date(Date.parse(at(0)) - 30_000).toISOString(),
+        entries: [
+          { role: 'tool', text: 'called request_transfer', seconds: 30 },
+          { role: 'agent', text: 'Please hold while I find a technician.', seconds: 32 },
+          { role: 'agent', text: 'Still looking, hang on.', seconds: 45 },
+          { role: 'user', text: 'Technician 1 did not pick up. Calling technician 2 now.', seconds: 55.5 },
+          { role: 'agent', text: 'Technician 1 did not pick up, I am trying the next one now.', seconds: 57 },
+          { role: 'agent', text: 'Kofi, the resident is in unit 4B.', seconds: 70 },
+        ],
+      }],
+    },
+  };
+  const page = renderDetail(report);
+  const label = (text) => page.match(new RegExp(`<td>([^<]+)</td><td class="text">${text.replace(/[.,]/g, '\\$&')}`))[1];
+  assert.equal(label('Please hold while I find a technician.'), 'Ava', 'before the first hold');
+  assert.equal(label('Still looking, hang on.'), 'Ava (muted, not heard)', 'during the first hold');
+  assert.equal(label('Technician 1 did not pick up, I am trying the next one now.'), 'Ava', 'the update itself was heard');
+  assert.equal(label('Kofi, the resident is in unit 4B.'), 'Ava (muted, not heard)', 'during the second mute');
+  assert.ok(page.includes('Technician 1 (+15550000001) did not take the call: Ava cued to tell the resident'));
+  assert.equal((page.match(/Resident put on hold with music/g) || []).length, 2);
+  assert.match(page, /<th>Resident told<\/th>/);
 });
 
 // ---------------------------------------------------------------- reports and security
