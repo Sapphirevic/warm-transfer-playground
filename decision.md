@@ -77,7 +77,10 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
   - The URL is theirs to change.
 
   Recommendation: use our own free ngrok account. Waiting for a decision.
-- [ ] Local `.env`: change `DIAL_MODE=parallel` to `DIAL_MODE=sequential` (D8).
+- [ ] **Prompt order: tool first, then "please hold".** On the first real call (2026-11-25), Ava said "I'm connecting you to a technician now. Please hold." but no report was created, so her `request_transfer` call never reached the server. The most likely cause is that the tool URL still pointed at the old ngrok address. She then went silent (skip_turn), with no music and no search: an awkward silence for the resident.
+  - Proposed: the prompt has her call the tool first and say "please hold" only when it returns `searching`. On an error, she apologises and offers to take a message.
+  - Prompt change only, no code change. Waiting for a decision.
+- [x] Local `.env`: change `DIAL_MODE=parallel` to `DIAL_MODE=sequential` (D8). Done 2026-11-25. Server restarted, and it now lists 2 technicians.
 - [ ] ElevenLabs: point the `request_transfer` tool URL at the current tunnel, paste the D9 prompt, enable skip_turn.
 
 ## Verification log
