@@ -173,6 +173,13 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 
 ## Open
 
+- [ ] **Iris goes silent after taking a message** (found 2026-11-25, call `CA3f30a2…`, 12:01).
+  - What happened: after "No technician is available right now" she asked "Can I take a message?". The caller gave one at 46 s. She called `skip_turn` at 52 s, and again on each of three "Hi, Iris" turns.
+  - Audio was fine: she was unmuted (12:01:30.9) and the resident was off hold (12:01:31.3).
+  - Cause: the D9 prompt's "On every turn, call skip_turn … The only exceptions are the two messages below." The caller's message is not one of those exceptions. The model behaves inconsistently here: on the 10:56 call she did reply.
+  - Proposed prompt fix (given to the team the same day): stay silent only *until* a cue. After "No technician is available", stop calling skip_turn, read the message back, say it is noted, and close the call.
+  - Also open: messages are not stored anywhere except the transcript. Option: a `take_message` tool that saves the message into the report and logs a `MESSAGE` line.
+  - Waiting for a decision.
 - [x] **First real call on this branch.** All three checked on 2026-11-25 (call `CA0c45…4d71`), see D13:
   - The resident does **not** hear the cue (D3): confirmed.
   - Ava (now Iris) breaks out of skip_turn to give the update: confirmed.
