@@ -27,7 +27,7 @@ When technician N does not take the call and technician N+1 is about to be calle
 1. The server plays a short cue to **Iris's call leg only**: "Technician N did not pick up. Calling technician N+1 now." The resident does not hear the cue; the room does not hear it either.
 2. While the cue plays, Iris is unmuted and the resident is taken off hold, so the resident hears about 3 seconds of silence.
 3. Iris hears the cue and, as her system prompt tells her, says one sentence to the resident, such as "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold."
-4. `HOLD_MUSIC_RESUME_SEC` seconds after the update started (default `10`), the music comes back and Iris is muted again, unless a technician has accepted or the search has ended by then.
+4. `HOLD_MUSIC_RESUME_SEC` seconds after the update started (default `13`), the music comes back and Iris is muted again, unless a technician has accepted or the search has ended by then.
 
 The cue only ever contains positions (1, 2, 3), never phone numbers, so Iris has nothing private to read out. If Iris is not in the room at that moment (her leg dropped), the update is skipped and logged as `UPDATE skipped`; the search carries on.
 
@@ -240,7 +240,7 @@ While technicians are being called, the resident hears music instead of silence.
 - The music is `HOLD_MUSIC_URL`: Twilio's classical hold music by default, or a link to your own `.mp3` or `.wav` file.
 - Iris is muted for the same period, so nothing she says is lost on a resident who cannot hear it.
 - The music stops when a technician joins, or when every technician has failed (Iris is then unmuted and talks to the resident again).
-- It also pauses for each [technician update](#technician-updates) and comes back `HOLD_MUSIC_RESUME_SEC` seconds later (default `10`). If Iris's update sentence gets cut off, raise it; if there is a silent gap before the music, lower it.
+- It also pauses for each [technician update](#technician-updates) and comes back `HOLD_MUSIC_RESUME_SEC` seconds later (default `13`). If Iris's update sentence gets cut off, raise it; if there is a silent gap before the music, lower it.
 - Set `HOLD_MUSIC_DELAY_SEC=off` to turn it off. Iris then keeps talking with the resident during the search, as before.
 - The report records `hold_started_at` and `hold_ended_at`, and the transcript shows both moments.
 
@@ -316,7 +316,7 @@ A real call on this branch has connected: Iris joined the room through the TwiML
 - **What Iris does while muted.** She still hears both people and may keep generating replies that nobody hears. They cost ElevenLabs usage and clutter the transcript; the prompt and the Skip turn tool reduce this.
 - **Which resident the leg is for.** The server passes the resident's call SID to the TwiML App as a custom parameter. If Twilio does not deliver it, the server falls back to "the one call currently waiting for Iris", which is right as long as two calls do not start at the same instant.
 - **If Iris never speaks**, look for `ERROR could not add Iris` or `ERROR /twilio/agent-leg` in the log.
-- **Technician updates (this branch) have not been tried on a real call yet.** Three things to listen for: that the resident does not hear the cue (it is sent to Iris's participant only, which is Twilio's documented behaviour but not yet heard here); that Iris breaks out of her skip_turn loop to give the update; and whether `HOLD_MUSIC_RESUME_SEC=10` suits her sentence.
+- **Technician updates have been checked on a real call** (2026-11-25, see `decision.md`). The Twilio room recording is silent while the cue plays to Iris, so the resident does not hear the cue, and Iris gave the update once. The ElevenLabs transcript and audio still show the cue as a **"User"** line before Iris's reply: that is what Iris heard, not something the resident heard. Iris's update took 10.2 s from cue to end of sentence, which is why `HOLD_MUSIC_RESUME_SEC` defaults to 13.
 
 ## Trial accounts and Geo Permissions
 

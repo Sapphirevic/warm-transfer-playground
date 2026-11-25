@@ -14,6 +14,30 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-25 - cue confirmed private, resume time raised (v0.2.4)
+
+**D3 confirmed on a real call** (call `CA0c45…4d71`, conversation `conv_4601…5sk5`). Technician 1 rang out, Iris gave the update, and technician 2 pressed 1 and joined.
+
+The ElevenLabs transcript shows the cue as a "User" line followed by Iris's reply, and that looked like a repeat. It isn't one: ElevenLabs records what is played into Iris's leg, and the cue is played there on purpose.
+
+What the resident heard was checked in Twilio's recording of the conference room: the mix of what the room hears, 8 kHz mono. It was measured as loudness in 250 ms windows, aligned to the server's timestamps:
+
+| Window | Loudness | Meaning |
+| --- | --- | --- |
+| 11:15:23.5 to 29.25 (cue playing to Iris; sent 23.489, ElevenLabs heard it at 46 s ≈ 11:15:24) | −96 dBFS, digital silence | The cue is not in the room. |
+| 11:15:29.5 to 33.65 | Speech, −15 to −28 dBFS | Iris's update; her transcript says 51 s ≈ 11:15:29. |
+| 11:15:46.5 to 48.25 (positive control) | Speech | "A technician has joined the call", which is announced to the room. It does appear, so a leaked cue would have shown too. |
+
+Three sources agree: the server report timestamps, the Twilio room recording, and the ElevenLabs transcript timing.
+
+**D13. `HOLD_MUSIC_RESUME_SEC` default raised from 10 to 13.**
+On the same call, Iris finished her update **10.16 s** after the cue was sent:
+- The cue took about 3.5 s to play, and she started speaking at +6.0 s.
+- The 10 s timer fired at +10.0 s, while she was still talking.
+- The music landed at +10.33 s only because Twilio took 0.33 s to apply it.
+
+Measured at 50 ms resolution, her audio stopped at 11:15:33.65, before the hold (33.82) and the mute (34.14) took effect, so nothing was cut. But that margin came from Twilio's response time, not from the design. 13 s gives about 3 s of margin over the measured 10.2 s. Raise it again if Iris's wording gets longer.
+
 ### 2026-11-25 - first successful real call, duplicate message fixed (v0.2.2)
 
 **First real call on this branch** (call `CA67c5…dc83`, agent "Sequential Testing"). The search went as designed:
@@ -109,12 +133,12 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 
 ## Open
 
-- [ ] **First real call on this branch.** Check:
-  - The resident does **not** hear the cue (D3).
-  - Ava breaks out of skip_turn to give the update.
-  - `HOLD_MUSIC_RESUME_SEC=10` fits her sentence.
+- [x] **First real call on this branch.** All three checked on 2026-11-25 (call `CA0c45…4d71`), see D13:
+  - The resident does **not** hear the cue (D3): confirmed.
+  - Ava (now Iris) breaks out of skip_turn to give the update: confirmed.
+  - `HOLD_MUSIC_RESUME_SEC=10` fits her sentence: **no**, it was too tight, so it is now 13.
 
-  README test-checklist cases 8 and 8b cover these.
+  Original checklist: README test-checklist cases 8 and 8b.
 - [x] **Duplicate "no technician" message.** Fixed by D12 (2026-11-25), after it was heard on the first real call. Original note: When the last technician fails, the room hears "No technician is available right now." in Twilio's voice, then Ava says nearly the same thing. This already happens on `agent-stays-on-call`.
   - Proposed fix: send that cue to Ava's leg only, like D3.
   - Trade-off: if Twilio refused the cue, the resident would hear nothing at that moment.
@@ -156,4 +180,6 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | D10 rename, D12 | `npm test` | 52/52 pass, 5 runs in a row |
 | 2026-11-25 | D12 | Broke it on purpose 2 ways, re-ran tests, restored | Back to the room-wide announcement: 7 tests fail. No fallback when Twilio refuses the cue: 1 fails. Code restored and matched the backup exactly |
 | 2026-11-25 | D12 Iris-only (v0.2.3) | `npm test`, then broke it on purpose 2 ways and restored | 53/53 pass, 5 runs in a row. Twilio fallback put back: 1 fails. Held cue never sent: 1 fails. Code restored and matched the backup exactly |
+| 2026-11-25 | D3 on a real call | (1) server report timestamps, (2) Twilio room recording loudness at 250 ms and 50 ms, with a positive control, (3) ElevenLabs transcript timing | All three agree: the cue is silent in the room, and Iris's update is heard once |
+| 2026-11-25 | D13 | `npm test` | 53/53 pass |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |

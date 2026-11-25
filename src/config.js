@@ -51,7 +51,7 @@ function loadConfig(env = process.env) {
     throw new Error(`HOLD_MUSIC_DELAY_SEC must be a number of seconds or "off", got "${env.HOLD_MUSIC_DELAY_SEC}"`);
   }
 
-  const resumeSetting = (env.HOLD_MUSIC_RESUME_SEC || '10').trim();
+  const resumeSetting = (env.HOLD_MUSIC_RESUME_SEC || '13').trim();
   const holdResumeMs = Number(resumeSetting) * 1000;
   if (!(holdResumeMs >= 0)) {
     throw new Error(`HOLD_MUSIC_RESUME_SEC must be a number of seconds, got "${env.HOLD_MUSIC_RESUME_SEC}"`);

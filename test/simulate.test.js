@@ -1097,7 +1097,7 @@ test('config: DIAL_MODE=parallel only warns, and HOLD_MUSIC_RESUME_SEC is read a
   };
   const plain = loadConfig(env);
   assert.deepEqual(plain.warnings, []);
-  assert.equal(plain.holdResumeMs, 10_000, 'default 10 seconds');
+  assert.equal(plain.holdResumeMs, 13_000, 'default 13 seconds (see decision.md D13)');
   assert.equal('dialMode' in plain, false);
   assert.deepEqual(plain.techNumbers, ['+15550000001', '+15550000002']);
 
