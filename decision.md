@@ -14,6 +14,27 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-25 - take_message tool (v0.3.0)
+
+**D16. Iris saves messages with a `take_message` tool.**
+Requested by the team after Iris offered to take a message and nothing recorded it. Messages previously existed only in the transcript.
+
+How it works:
+- New endpoint `POST /tool/take-message`, protected like `request_transfer`: it needs `X-Tool-Secret` and `call_sid`, and also accepts `parent_call_sid`.
+- The message is trimmed, its whitespace collapsed, and it is capped at 1000 characters.
+- It is appended to the transfer's `messages`. Several messages on one call are all kept, in order.
+- It is logged as `MESSAGE resident=… call=… saved to report (#n)`.
+- It is shown in the detail page's **Message** row, in the list page's **Message** column, and as a transcript marker.
+- A message on a call with no transfer has no report to go into, so it is only logged. The tool still answers 200, so Iris is not confused.
+- Rejected requests: bad secret (401), malformed `call_sid` (400), empty message (400), unknown call (404).
+
+The prompt fix from the open item is folded in:
+- Iris stays silent *until* a cue, not "with only two exceptions".
+- After "No technician is available" she replies normally, calls `take_message`, and says "Thanks, I've saved your message for the maintenance team."
+- The `request_transfer` tool reply now says the same.
+
+Still needed in ElevenLabs: add the `take_message` tool to the "Sequential Testing" agent (settings in the README) and paste the new prompt.
+
 ### 2026-11-25 - call sequence proof in reports (v0.2.6)
 
 **D15. Reports prove technicians are called one at a time.**
@@ -173,7 +194,7 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 
 ## Open
 
-- [ ] **Iris goes silent after taking a message** (found 2026-11-25, call `CA3f30a2…`, 12:01).
+- [x] **Iris goes silent after taking a message**: addressed by D16 (new prompt + take_message), still to be confirmed on a real call. (found 2026-11-25, call `CA3f30a2…`, 12:01).
   - What happened: after "No technician is available right now" she asked "Can I take a message?". The caller gave one at 46 s. She called `skip_turn` at 52 s, and again on each of three "Hi, Iris" turns.
   - Audio was fine: she was unmuted (12:01:30.9) and the resident was off hold (12:01:31.3).
   - Cause: the D9 prompt's "On every turn, call skip_turn … The only exceptions are the two messages below." The caller's message is not one of those exceptions. The model behaves inconsistently here: on the 10:56 call she did reply.
@@ -232,4 +253,5 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | D14 | (1) `npm test` (test built from the real call's lines), (2) label fix removed on purpose and restored, (3) real report CA0c45…4d71 rendered with the new code | 54/54 pass, 5 runs in a row. 1 test fails without the fix. The real report shows the cue as "Cue to Iris only", the announcement as "Room announcement (Twilio), plus the caller", and Iris's update as "Iris" at 11:15:30, matching the room recording |
 | 2026-11-25 | D15 | (1) `npm test` incl. a parallel pattern that must fail, (2) sequence recomputed on the 2 real call reports, (3) Twilio call records (created/end times) for every technician call | 56/56 pass. Both real calls one at a time, next technician dialled 2 ms after the previous outcome. Twilio: next call created 0 s and 1 s after the previous call ended |
 | 2026-11-25 | Flaky-test fix | 10 consecutive full runs after widening the 3 tight timing tests | 10/10 clean |
+| 2026-11-25 | D16 | `npm test` (3 new take_message tests), then message-saving removed on purpose and restored | 59/59 pass. 2 tests fail without saving. Code restored and matched the backup exactly |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |

@@ -75,6 +75,8 @@ function buildReport(t) {
     agent_mute_periods: periods(t.mutePeriods),
     // Each time a technician did not take the call and the next one was called, Iris was
     // cued to tell the resident. `cue` is what Iris heard; the resident heard Iris's reply.
+    // Messages Iris took for the maintenance team with the take_message tool.
+    messages: (t.messages || []).map((m) => ({ text: m.text, at: iso(m.at), seconds_from_tool_call: after(m.at) })),
     resident_updates: (t.residentUpdates || []).map((u) => ({
       technician: u.tech + 1,
       number: t.techs[u.tech].number,
@@ -283,13 +285,14 @@ function renderList(reports) {
   <td>${seconds(r.resident_wait_seconds)}</td>
   <td>${(r.technicians || []).filter((tech) => tech.outcome !== 'not-called').map((tech) => `${esc(tech.number)}: ${esc(tech.outcome)}`).join('<br>') || '-'}</td>
   <td class="text">${dash(r.summary)}</td>
+  <td class="text">${(r.messages || []).length ? esc(r.messages.map((m) => m.text).join(' / ')) : '-'}</td>
   <td><a href="/reports/${esc(r.resident_call_sid)}">${transcriptLineCount(r) ? `${transcriptLineCount(r)} lines` : 'open'}</a></td>
   <td><a href="/reports/${esc(r.resident_call_sid)}">${esc(r.resident_call_sid)}</a></td>
 </tr>`);
 
   return page('Transfer reports', `<h1>Transfer reports (${reports.length})</h1>
 ${reports.length === 0 ? '<p>No transfers yet. A report appears here as soon as Iris calls request_transfer.</p>' : `<div class="wrap"><table>
-<tr><th>Started</th><th>Resident</th><th>Mode</th><th>Sequence</th><th>Agent</th><th>Result</th><th>Resident waited</th><th>Technicians</th><th>Summary</th><th>Transcript</th><th>Call SID</th></tr>
+<tr><th>Started</th><th>Resident</th><th>Mode</th><th>Sequence</th><th>Agent</th><th>Result</th><th>Resident waited</th><th>Technicians</th><th>Summary</th><th>Message</th><th>Transcript</th><th>Call SID</th></tr>
 ${rows.join('\n')}
 </table></div>`}`);
 }
@@ -353,6 +356,9 @@ function renderTranscript(r) {
   for (const p of mutePeriods) {
     rows.push({ at: p.from, role: 'marker', text: 'Iris muted: she keeps listening but nobody hears her' });
     if (p.to) rows.push({ at: p.to, role: 'marker', text: 'Iris unmuted' });
+  }
+  for (const m of r.messages || []) {
+    rows.push({ at: m.at, role: 'marker', text: `Iris saved a message: "${m.text}"` });
   }
   for (const u of r.resident_updates || []) {
     rows.push({ at: u.at, role: 'marker', text: `Technician ${u.technician} (${u.number}) did not take the call: Iris cued to tell the resident` });
@@ -499,6 +505,9 @@ function renderDetail(r) {
 <tr><th>Tool call (start)</th><td>${time(r.started_at)}</td></tr>
 <tr><th>Finished</th><td>${time(r.finished_at)}</td></tr>
 <tr><th>Summary</th><td class="text">${dash(r.summary)}</td></tr>
+<tr><th>Message</th><td class="text">${(r.messages || []).length
+    ? r.messages.map((m) => `<strong>${esc(m.text)}</strong><br><span class="note">saved by Iris at ${time(m.at)}</span>`).join('<br><br>')
+    : '-'}</td></tr>
 </table></div>
 
 <h2>Technicians</h2>

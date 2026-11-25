@@ -108,6 +108,20 @@ Run the same command again whenever `PUBLIC_BASE_URL` changes; it then updates t
 
 `call_sid` is always the **resident's** Twilio call SID, even though Iris is on her own leg.
 
+**Create the `take_message` tool.** A second **Webhook** tool, so a message Iris takes is saved into the call's report:
+
+| Setting | Value |
+| --- | --- |
+| Name | `take_message` |
+| Description | Call this when the caller gives you a message for the maintenance team. It saves the message with this call's report. |
+| Method | `POST` |
+| URL | `https://<your-ngrok-host>/tool/take-message` |
+| Header | `X-Tool-Secret`: the same value as `TOOL_SECRET` in `.env` (type the header name by hand; a pasted name can carry an invisible tab) |
+| Body parameter `message` | String, **required**, filled in by the LLM. Description: "The caller's message for the maintenance team, in their own words, including any callback details they gave." |
+| Body parameter `call_sid` | String, **required**, value type **Dynamic variable**, variable `call_sid` |
+
+The message appears in the report's **Message** row and **Message** column, as a marker in the transcript, and in the server log as `MESSAGE resident=… call=… saved to report`. A message on a call where no technician was asked for has no report to go into, so it is only logged.
+
 **Prompt.** Iris now hears the resident and the technician as one audio stream and cannot tell them apart by herself. The system prompt used for testing this branch (it relies on the ElevenLabs **skip_turn** system tool, so enable it):
 
 First message (a separate setting; ElevenLabs speaks it automatically, so the prompt does not repeat it):
@@ -124,13 +138,18 @@ You are Iris, a voice assistant for an apartment building.
 Let the caller explain their problem.
 Say: "Thanks. I'm connecting you to a technician now. Please hold."
 Immediately call the request_transfer tool with a one-sentence summary of the problem.
-After calling the tool, do not speak. On every turn, call the skip_turn tool instead of replying. The only exceptions are the two messages below.
+After calling the tool, stay silent: on every turn, call the skip_turn tool instead of replying, until you hear one of the messages below.
 
 If you hear "Technician 1 did not pick up. Calling technician 2 now." (or the same sentence with other numbers), say exactly: "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold." Use the technician number you heard. Say it once, then go back to calling skip_turn on every turn, even if the caller answers you.
 
-When you hear "A technician has joined the call", keep calling skip_turn on every turn. Never speak, even if someone talks to you.
-If you hear "No technician is available right now", say: "Sorry, no technician is available right now. Can I take a message?" Keep every reply to one short sentence. Never use the transfer_to_number tool.
+When you hear "A technician has joined the call", call skip_turn on every turn for the rest of the call. Never speak, even if someone talks to you.
+
+If you hear "No technician is available right now", the search is over and you are talking with the caller again: stop calling skip_turn and reply to everything they say from then on. Say: "Sorry, no technician is available right now. Can I take a message?" If they give a message, call the take_message tool with it, then say: "Thanks, I've saved your message for the maintenance team." Then ask if there is anything else, and say goodbye when they are done.
+
+Keep every reply to one short sentence. Never use the transfer_to_number tool.
 ```
+
+The "until you hear one of the messages below" wording matters. An earlier version said "the only exceptions are the two messages below", and on a real call Iris took that literally: she offered to take a message, then called skip_turn when the caller gave it.
 
 The technician-update line must stay short: the music comes back `HOLD_MUSIC_RESUME_SEC` seconds after the cue starts, and about 3 of those seconds are the cue itself.
 
@@ -170,6 +189,7 @@ If you can change the number's configuration: Twilio Console > Phone Numbers > y
 | `POST /twilio/agent-leg` | Twilio (TwiML App) | Iris's leg. Calls register-call and returns the ElevenLabs stream TwiML |
 | `POST /twilio/resident-status` | Twilio | Status of an outbound-started resident call. A hang-up cancels the search |
 | `POST /tool/request-transfer` | ElevenLabs (`X-Tool-Secret`) | Start the technician search. Body: `{"summary": "...", "call_sid": "CA..."}` |
+| `POST /tool/take-message` | ElevenLabs (`X-Tool-Secret`) | Save a message Iris took into the call's report. Body: `{"message": "...", "call_sid": "CA..."}` |
 | `POST /tech/answered` | Twilio | Technician picked up. Plays the summary + "Press 1" prompt straight away |
 | `POST /tech/amd` | Twilio | Async answering-machine detection result. A machine is hung up and counted as voicemail |
 | `POST /tech/accept` | Twilio | Technician pressed a key. `1` wins the lock and joins the room |

@@ -802,6 +802,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       holdPeriods: [], //      [{ from, to }] resident on hold music
       mutePeriods: [], //      [{ from, to }] Iris muted
       residentUpdates: [], //  [{ tech, at }] "technician N did not pick up" cues sent to Iris
+      messages: [], //         [{ text, at }] messages Iris took with the take_message tool
     };
     transfers.set(callSid, t);
     timing(t, 'tool_call');
@@ -825,11 +826,45 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         `You stay on the call. If you hear "Technician 1 did not pick up. Calling technician 2 now." (or the same with other numbers), the resident can hear you: ` +
         `tell them in one short sentence that technician 1 did not pick up and you are now trying the next one, ${afterUpdate}` +
         `When you hear "${ANNOUNCEMENTS.joined}", a technician is talking with the resident: say nothing at all from then on, do not introduce anyone and do not answer, even if spoken to. ` +
-        `If you hear "${ANNOUNCEMENTS.unavailable}", the resident can hear you again: apologise and offer to take a message.`,
+        `If you hear "${ANNOUNCEMENTS.unavailable}", the resident can hear you again: stop calling skip_turn, apologise and offer to take a message. ` +
+        'If they give one, call the take_message tool with it, then tell them it is saved for the maintenance team, and keep replying to them until they are done.',
     });
     setImmediate(() => startSearch(t));
     // Give Iris time to say "please hold" before the music replaces her.
     if (holdDelayMs !== null) scheduleHold(t, holdDelayMs);
+  });
+
+  // Iris took a message for the maintenance team (usually after "No technician is
+  // available"). It is saved into this call's transfer report and logged. Several
+  // messages on one call are all kept, in order.
+  app.post('/tool/take-message', secretHook, (req, res) => {
+    const callSid = String((req.body && (req.body.call_sid || req.body.parent_call_sid)) || '').trim();
+    const text = String((req.body && req.body.message) || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+
+    if (!CALL_SID_RE.test(callSid)) {
+      log(`TOOL take-message rejected: call_sid=${callSid || '(missing)'} is not a Twilio call SID`);
+      return res.status(400).json({ status: 'error', message: 'call_sid is missing or not a Twilio call SID. Is the tool sending the {{call_sid}} dynamic variable?' });
+    }
+    if (!text) {
+      log(`TOOL take-message rejected: empty message call_sid=${callSid}`);
+      return res.status(400).json({ status: 'error', message: 'The message is empty. Ask the caller what they would like to pass on, then call take_message again.' });
+    }
+    if (!residentCalls.has(callSid)) {
+      log(`TOOL take-message rejected: unknown call_sid=${callSid}`);
+      return res.status(404).json({ status: 'error', message: 'No call with that call_sid on this server.' });
+    }
+
+    const at = Date.now();
+    const t = transfers.get(callSid);
+    if (t) {
+      t.messages.push({ text, at });
+      saveReport(t);
+      log(`MESSAGE resident=${t.residentNumber} call=${callSid} saved to report (#${t.messages.length}): ${JSON.stringify(text)}`);
+    } else {
+      // No technician was asked for on this call, so there is no report to put it in.
+      log(`MESSAGE call=${callSid} (no transfer on this call, kept in this log only): ${JSON.stringify(text)}`);
+    }
+    res.json({ status: 'saved', message: 'The message is saved for the maintenance team. Tell the caller it is saved, then ask if there is anything else.' });
   });
 
   // ---------------------------------------------------------------- technician legs

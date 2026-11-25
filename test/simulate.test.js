@@ -1497,3 +1497,67 @@ test('call sequence: parallel-style overlap is flagged, and a line still closing
     { outcome: 'busy', dialled_at: at(5), outcome_at: at(9) },
   ]).max_offered_the_call_at_once, 1);
 });
+
+// ---------------------------------------------------------------- take_message tool
+
+test('take_message: after "no technician" the message is saved into the report, logged, and shown on both pages', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001'] });
+  t.after(s.close);
+  const reply = await s.residentAsksForTransfer();
+  assert.match(reply.body.message, /call the take_message tool/, 'the tool reply tells Iris about take_message');
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.equal(s.report().result, 'no technician');
+
+  const saved = await s.json('/tool/take-message', { call_sid: RESIDENT, message: '  Please call me back about   my booking. ' });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.status, 'saved');
+  assert.match(saved.body.message, /saved for the maintenance team/);
+  await s.json('/tool/take-message', { call_sid: RESIDENT, message: 'Unit 4B <after 5pm> & weekends' });
+
+  const report = s.report();
+  assert.deepEqual(report.messages.map((m) => m.text), ['Please call me back about my booking.', 'Unit 4B <after 5pm> & weekends'], 'trimmed, whitespace collapsed, both kept in order');
+  assert.ok(report.messages.every((m) => m.at && typeof m.seconds_from_tool_call === 'number'));
+  assert.equal(report.result, 'no technician', 'the rest of the report is unchanged');
+  assert.ok(s.logs.some((line) => line.includes('MESSAGE resident=+15551110000') && line.includes('(#1): "Please call me back about my booking."')));
+
+  const detail = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(detail.includes('<strong>Please call me back about my booking.</strong>'));
+  assert.ok(detail.includes('Unit 4B &lt;after 5pm&gt; &amp; weekends'), 'HTML-escaped');
+  assert.ok(!detail.includes('<after 5pm>'));
+  const list = (await s.get('/reports')).text;
+  assert.ok(list.includes('<th>Message</th>'));
+  assert.ok(list.includes('Please call me back about my booking. / Unit 4B &lt;after 5pm&gt; &amp; weekends'));
+});
+
+test('take_message: needs the tool secret, a real call_sid, a known call and a non-empty message', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+
+  assert.equal((await s.json('/tool/take-message', { call_sid: RESIDENT, message: 'hi' }, null)).status, 401);
+  assert.equal((await s.json('/tool/take-message', { call_sid: RESIDENT, message: 'hi' }, 'wrong-secret')).status, 401);
+  assert.equal((await s.json('/tool/take-message', { call_sid: 'nope', message: 'hi' })).status, 400);
+  const empty = await s.json('/tool/take-message', { call_sid: RESIDENT, message: '   ' });
+  assert.equal(empty.status, 400);
+  assert.match(empty.body.message, /message is empty/);
+  assert.equal((await s.json('/tool/take-message', { call_sid: `CA${'f'.repeat(32)}`, message: 'hi' })).status, 404);
+  assert.deepEqual(s.report().messages, [], 'nothing saved by a rejected request');
+  // parent_call_sid is accepted too, like request_transfer
+  assert.equal((await s.json('/tool/take-message', { parent_call_sid: RESIDENT, message: 'via parent' })).status, 200);
+  assert.deepEqual(s.report().messages.map((m) => m.text), ['via parent']);
+  // very long messages are cut to 1000 characters
+  await s.json('/tool/take-message', { call_sid: RESIDENT, message: 'x'.repeat(1500) });
+  assert.equal(s.report().messages.at(-1).text.length, 1000);
+});
+
+test('take_message: a message on a call with no transfer is accepted and logged (there is no report to hold it)', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentIsWithAva();
+
+  const saved = await s.json('/tool/take-message', { call_sid: RESIDENT, message: 'Just letting you know the lift is noisy.' });
+  assert.equal(saved.status, 200);
+  assert.equal(s.state.transfers.size, 0, 'no transfer and no report are created');
+  assert.ok(s.logs.some((line) => line.includes('MESSAGE call=') && line.includes('no transfer on this call, kept in this log only') && line.includes('lift is noisy')));
+});
