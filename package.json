@@ -1,6 +1,6 @@
 {
   "name": "warm-transfer-playground",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Playground: warm transfer from an ElevenLabs agent to a technician using Twilio conferences",
   "main": "server.js",

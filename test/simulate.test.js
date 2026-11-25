@@ -765,7 +765,7 @@ test('all fail after Iris dropped: she is brought back with the first-message ov
   assert.equal(s.roomEnded(), false);
 });
 
-test('all fail, and Twilio refuses the cue to Iris: the line is announced to the whole room instead', async (t) => {
+test('all fail, and Twilio refuses the cue to Iris: the error is logged and Twilio says nothing to the room', async (t) => {
   const s = await setup({ techNumbers: ['+15550000001'] });
   t.after(s.close);
   await s.residentAsksForTransfer();
@@ -773,8 +773,29 @@ test('all fail, and Twilio refuses the cue to Iris: the line is announced to the
 
   await s.tech(0).status('no-answer');
   await tick();
-  assert.deepEqual(s.roomActions, ['cue:unavailable', 'announce:unavailable'], 'tried Iris first, then the room');
+  assert.deepEqual(s.roomActions, ['cue:unavailable'], 'only the cue to Iris was attempted');
+  assert.deepEqual(s.announcements(), [], "never announced to the room in Twilio's voice");
   assert.ok(s.logs.some((line) => line.includes('ERROR could not send the cue "No technician is available right now." to Iris') && line.includes('Twilio error 20404')));
+});
+
+test('all fail while Iris is still joining: the cue waits and goes to her the moment she is in', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001'] });
+  t.after(s.close);
+  await s.hook('/twilio/inbound', { CallSid: RESIDENT, From: RESIDENT_NUMBER, To: TWILIO_NUMBER, Direction: 'inbound' });
+  await s.room('participant-join', { CallSid: RESIDENT }); // Iris is being added, not in yet
+  await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'Leak.' });
+  await tick();
+  assert.equal(s.state.residentCalls.get(RESIDENT).agent.state, 'joining');
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.agentCues, [], 'no leg to cue yet');
+  assert.deepEqual(s.announcements(), [], "and nothing in Twilio's voice meanwhile");
+
+  await s.avaJoins();
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['unavailable']);
+  assert.equal(s.agentCues[0].callSid, s.agentLegs[0].callSid);
+  assert.deepEqual(s.announcements(), []);
 });
 
 // ---------------------------------------------------------------- resident hangs up

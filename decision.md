@@ -32,11 +32,12 @@ Before that call, register-call had failed with HTTP 401 `missing the permission
 **D12. "No technician is available right now" goes to Iris's leg only.**
 On that call the resident heard the line twice: Twilio's voice to the whole room, then Iris. Now the line is a private cue to Iris, like D3, so the resident hears only Iris's apology.
 - Order: cue first, then Iris unmuted and the music off.
-- If Twilio refuses the cue, the line is announced to the whole room instead, so the resident is never left in silence. This was the trade-off noted in the open item.
-- If Iris's leg is still connecting (no call to cue yet), the room announcement is used as before.
-- If her leg has dropped, she is brought back with the fallback first message, as before.
+- **Only Iris gives this message, never Twilio's voice** (team rule, v0.2.3). A first version of D12 (v0.2.2) fell back to the room announcement in two edge cases; both were removed:
+  - If Twilio refuses the cue, the error is logged and nothing else is played. The trade-off is a moment of silence in that rare case, which the team chose over a robot voice.
+  - If Iris's leg is still connecting, the cue is held and sent the moment she joins.
+- If her leg has dropped, she is brought back with the fallback first message, so it is still Iris speaking.
 
-Code: `cueAgent` and `noTechnician` in `src/app.js`. The technician update (D3) now uses the same `cueAgent` helper.
+Code: `cueAgent` and `noTechnician` in `src/app.js`. The held cue is `agent.pendingCue`, sent on her `participant-join`. The technician update (D3) uses the same `cueAgent` helper.
 
 ### 2026-11-25 - agent renamed to Iris (v0.2.1)
 
@@ -154,4 +155,5 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | D1-D9 on a real call | Server log, saved report and ElevenLabs transcript of call `CA67c5…dc83`, compared with each other | Order and timings agree. Update spoken by Iris, music resumed after 10.3 s. Duplicate "no technician" message heard (fixed by D12) |
 | 2026-11-25 | D10 rename, D12 | `npm test` | 52/52 pass, 5 runs in a row |
 | 2026-11-25 | D12 | Broke it on purpose 2 ways, re-ran tests, restored | Back to the room-wide announcement: 7 tests fail. No fallback when Twilio refuses the cue: 1 fails. Code restored and matched the backup exactly |
+| 2026-11-25 | D12 Iris-only (v0.2.3) | `npm test`, then broke it on purpose 2 ways and restored | 53/53 pass, 5 runs in a row. Twilio fallback put back: 1 fails. Held cue never sent: 1 fails. Code restored and matched the backup exactly |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |

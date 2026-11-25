@@ -237,7 +237,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       conferenceSid: null,
       present: new Set(), // call SIDs in the room right now
       // state: none -> joining -> in -> left
-      agent: { state: 'none', callSid: null, joins: 0, firstMessage: null, muted: false },
+      agent: { state: 'none', callSid: null, joins: 0, firstMessage: null, muted: false, pendingCue: null },
       onHold: false, //                    resident is hearing hold music
       roomQueue: Promise.resolve(), //     see inOrder()
     };
@@ -617,11 +617,11 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     dialNext(t);
   }
 
-  // Nobody took it. Iris is normally still in the room, so she is told by a cue that
-  // only she hears (like a technician update) and the resident hears her apology once.
-  // If Twilio refuses that cue, the line is announced to the whole room instead, so the
-  // resident is never left in silence. If her leg has dropped she is brought back with
-  // the fallback first message.
+  // Nobody took it. Only Iris tells the resident (D12): she gets a cue that only she
+  // hears, and the resident hears her apology once. Twilio's voice never says it to the
+  // room. If Twilio refuses the cue, the error is logged and nothing else is played.
+  // If her leg is still connecting, the cue waits and is sent the moment she joins.
+  // If her leg has dropped, she is brought back with the fallback first message.
   function noTechnician(t) {
     t.status = 'failed';
     t.timings.all_failed = timing(t, 'all_technicians_failed');
@@ -632,15 +632,13 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const { agent } = resident;
     if (agent.state === 'in' && agent.callSid) {
       // Cue first, then music off and Iris's voice back on, all while the cue plays.
-      cueAgent(t.residentCallSid, 'kind=unavailable', ANNOUNCEMENTS.unavailable).then((cued) => {
-        if (!cued) announce(t.residentCallSid, 'unavailable');
-      });
+      cueAgent(t.residentCallSid, 'kind=unavailable', ANNOUNCEMENTS.unavailable);
       setAgentMuted(t.residentCallSid, false, 'no technician available');
       endHold(t, 'no technician available');
     } else if (agent.state === 'joining') {
-      // Her leg is still connecting: no call to cue yet, so tell the room.
       endHold(t, 'no technician available');
-      announce(t.residentCallSid, 'unavailable');
+      agent.pendingCue = { query: 'kind=unavailable', text: ANNOUNCEMENTS.unavailable };
+      log(`AGENT Iris is still joining ${roomName(t.residentCallSid)}: "${ANNOUNCEMENTS.unavailable}" will be cued when she is in`);
     } else {
       endHold(t, 'no technician available');
       log(`AGENT Iris is not in the room, bringing her back for resident=${t.residentCallSid}`);
@@ -1001,6 +999,12 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         resident.agent.state = 'in';
         resident.agent.callSid = body.CallSid;
         resident.agent.muted = false; // a leg always joins unmuted
+        // A cue that came up while her leg was still connecting (see noTechnician).
+        const pending = resident.agent.pendingCue;
+        if (pending) {
+          resident.agent.pendingCue = null;
+          cueAgent(residentCallSid, pending.query, pending.text);
+        }
       } else if (who === 'technician' && t.status === 'bridging') {
         t.status = 'connected';
         t.timings.technician_joined = timing(t, 'technician_joined', `conference=${body.ConferenceSid}`);
