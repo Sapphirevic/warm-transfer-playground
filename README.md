@@ -1,46 +1,46 @@
 # Warm-transfer playground (Twilio + ElevenLabs)
 
-> **Branch `sequential-with-updates`** (built on `agent-stays-on-call`). Ava stays on the call with the resident and the technician (a three-way call). Technicians are called **one at a time**, and each time one does not take the call, **Ava tells the resident** before the next one is called. There is no parallel calling on this branch. On `main` Ava hands the resident over and leaves. See [Switching between versions](#switching-between-versions).
+> **Branch `sequential-with-updates`** (built on `agent-stays-on-call`). Iris stays on the call with the resident and the technician (a three-way call). Technicians are called **one at a time**, and each time one does not take the call, **Iris tells the resident** before the next one is called. There is no parallel calling on this branch. On `main` Iris hands the resident over and leaves. See [Switching between versions](#switching-between-versions).
 
-A small Express server for trying out a warm transfer from an ElevenLabs agent ("Ava") to a human technician.
+A small Express server for trying out a warm transfer from an ElevenLabs agent ("Iris") to a human technician.
 
-- Twilio owns the call. Ava is connected with the ElevenLabs **register-call** API. No ElevenLabs telephony, no phone-number import.
+- Twilio owns the call. Iris is connected with the ElevenLabs **register-call** API. No ElevenLabs telephony, no phone-number import.
 - Register-call cannot transfer calls, so everything is done with Twilio conferences.
 
 ## How a call works on this branch
 
-The resident, Ava and the technician all sit in one Twilio conference room, `room-<resident call_sid>`.
+The resident, Iris and the technician all sit in one Twilio conference room, `room-<resident call_sid>`.
 
 1. The resident's call goes straight into the room.
-2. The server adds Ava to the room as her own call leg. Twilio reaches that leg through a TwiML App whose Voice URL is `/twilio/agent-leg`, and that endpoint returns the ElevenLabs register-call TwiML. The resident hears a second or two of silence, then Ava.
-3. Ava calls the `request_transfer` tool with a `summary` and the resident's `call_sid`. The server answers straight away (`"status": "searching"`) and calls technicians in the background. Ava asks the resident to hold, and about 5 seconds after the tool call the resident is put on **hold music** and Ava is muted. See [Hold music](#hold-music).
+2. The server adds Iris to the room as her own call leg. Twilio reaches that leg through a TwiML App whose Voice URL is `/twilio/agent-leg`, and that endpoint returns the ElevenLabs register-call TwiML. The resident hears a second or two of silence, then Iris.
+3. Iris calls the `request_transfer` tool with a `summary` and the resident's `call_sid`. The server answers straight away (`"status": "searching"`) and calls technicians in the background. Iris asks the resident to hold, and about 5 seconds after the tool call the resident is put on **hold music** and Iris is muted. See [Hold music](#hold-music).
 4. Technicians are called **one at a time**, in `TECH_NUMBERS` order. A technician who picks up hears the summary and "Press 1 to connect to the resident." (up to 3 times). Answering-machine detection runs in the background.
 5. **If the technician does not take the call** (no answer, busy, voicemail, declined, no key pressed, or the call could not be placed) and there is another technician to try, the resident is told. See [Technician updates](#technician-updates). The next technician is dialled at the same moment.
 6. A technician who presses 1 hears "Connecting you to the resident." and joins the same room.
-7. The server stops the hold music and makes sure Ava is muted, then everyone hears "A technician has joined the call." From here the resident and the technician talk to each other and **Ava says nothing**: she stays on the call and keeps listening, but nobody can hear her. Nobody is moved, so her conversation carries on and she remembers everything said before. If the technician hangs up, Ava is unmuted and the resident is talking to her again.
-8. If the last technician fails too, the music stops, Ava is unmuted, everyone hears "No technician is available right now." and Ava, still on the call, offers to take a message. (No technician update is given for the last one: this message replaces it.)
+7. The server stops the hold music and makes sure Iris is muted, then everyone hears "A technician has joined the call." From here the resident and the technician talk to each other and **Iris says nothing**: she stays on the call and keeps listening, but nobody can hear her. Nobody is moved, so her conversation carries on and she remembers everything said before. If the technician hangs up, Iris is unmuted and the resident is talking to her again.
+8. If the last technician fails too, the music stops, Iris is unmuted, everyone hears "No technician is available right now." and Iris, still on the call, offers to take a message. (No technician update is given for the last one: this message replaces it.)
 
 ## Technician updates
 
 When technician N does not take the call and technician N+1 is about to be called:
 
-1. The server plays a short cue to **Ava's call leg only**: "Technician N did not pick up. Calling technician N+1 now." The resident does not hear the cue; the room does not hear it either.
-2. While the cue plays, Ava is unmuted and the resident is taken off hold, so the resident hears about 3 seconds of silence.
-3. Ava hears the cue and, as her system prompt tells her, says one sentence to the resident, such as "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold."
-4. `HOLD_MUSIC_RESUME_SEC` seconds after the update started (default `10`), the music comes back and Ava is muted again, unless a technician has accepted or the search has ended by then.
+1. The server plays a short cue to **Iris's call leg only**: "Technician N did not pick up. Calling technician N+1 now." The resident does not hear the cue; the room does not hear it either.
+2. While the cue plays, Iris is unmuted and the resident is taken off hold, so the resident hears about 3 seconds of silence.
+3. Iris hears the cue and, as her system prompt tells her, says one sentence to the resident, such as "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold."
+4. `HOLD_MUSIC_RESUME_SEC` seconds after the update started (default `10`), the music comes back and Iris is muted again, unless a technician has accepted or the search has ended by then.
 
-The cue only ever contains positions (1, 2, 3), never phone numbers, so Ava has nothing private to read out. If Ava is not in the room at that moment (her leg dropped), the update is skipped and logged as `UPDATE skipped`; the search carries on.
+The cue only ever contains positions (1, 2, 3), never phone numbers, so Iris has nothing private to read out. If Iris is not in the room at that moment (her leg dropped), the update is skipped and logged as `UPDATE skipped`; the search carries on.
 
-The server only sends the cue: what Ava says comes from her **ElevenLabs system prompt** (see step 4 of [Setup](#4-configure-the-elevenlabs-agent)). The tool reply also tells her what the cue means.
+The server only sends the cue: what Iris says comes from her **ElevenLabs system prompt** (see step 4 of [Setup](#4-configure-the-elevenlabs-agent)). The tool reply also tells her what the cue means.
 
 Who can end the call:
 
 - The **resident** hanging up ends it for everyone, and cancels any technician calls still ringing.
-- The **technician** hanging up leaves the resident with Ava.
-- **Ava** ending her conversation leaves the resident with the technician.
+- The **technician** hanging up leaves the resident with Iris.
+- **Iris** ending her conversation leaves the resident with the technician.
 - If the resident would be left alone in the room, the server ends the call.
 
-The whole call is recorded, including the part with only Ava.
+The whole call is recorded, including the part with only Iris.
 
 ## Requirements
 
@@ -77,13 +77,13 @@ npm run tunnel
 
 It opens the tunnel and writes the public URL into `PUBLIC_BASE_URL` in `.env`. The server validates Twilio signatures against `PUBLIC_BASE_URL` + the request path, so this value must be exactly the host Twilio calls.
 
-### 3. Create the TwiML App for Ava's leg (this branch only)
+### 3. Create the TwiML App for Iris's leg (this branch only)
 
 ```powershell
 node scripts/setup-agent-app.js
 ```
 
-This creates a TwiML App named "Warm transfer playground - Ava leg" in your Twilio account, with the Voice URL `PUBLIC_BASE_URL/twilio/agent-leg`, and writes its SID into `.env` as `TWILIO_AGENT_APP_SID`. The server will not start without it.
+This creates a TwiML App named "Warm transfer playground - Iris leg" in your Twilio account, with the Voice URL `PUBLIC_BASE_URL/twilio/agent-leg`, and writes its SID into `.env` as `TWILIO_AGENT_APP_SID`. The server will not start without it.
 
 Run the same command again whenever `PUBLIC_BASE_URL` changes; it then updates the existing app's URL. You can also do this by hand in the Twilio Console under TwiML Apps.
 
@@ -106,14 +106,21 @@ Run the same command again whenever `PUBLIC_BASE_URL` changes; it then updates t
 | Body parameter `summary` | String, filled in by the LLM. Description: "One or two sentences on who is calling and what the problem is. This is read aloud to the technician." |
 | Body parameter `call_sid` | String, value type **Dynamic variable**, variable `call_sid` (i.e. `{{call_sid}}`) |
 
-`call_sid` is always the **resident's** Twilio call SID, even though Ava is on her own leg.
+`call_sid` is always the **resident's** Twilio call SID, even though Iris is on her own leg.
 
-**Prompt.** Ava now hears the resident and the technician as one audio stream and cannot tell them apart by herself. The system prompt used for testing this branch (it relies on the ElevenLabs **skip_turn** system tool, so enable it):
+**Prompt.** Iris now hears the resident and the technician as one audio stream and cannot tell them apart by herself. The system prompt used for testing this branch (it relies on the ElevenLabs **skip_turn** system tool, so enable it):
+
+First message (a separate setting; ElevenLabs speaks it automatically, so the prompt does not repeat it):
 
 ```
-You are Ava, a voice assistant for an apartment building.
+Hi, this is Iris. How can I help you today?
+```
 
-Say: "Hi, this is Ava. How can I help you today?"
+System prompt:
+
+```
+You are Iris, a voice assistant for an apartment building.
+
 Let the caller explain their problem.
 Say: "Thanks. I'm connecting you to a technician now. Please hold."
 Immediately call the request_transfer tool with a one-sentence summary of the problem.
@@ -127,9 +134,9 @@ If you hear "No technician is available right now", say: "Sorry, no technician i
 
 The technician-update line must stay short: the music comes back `HOLD_MUSIC_RESUME_SEC` seconds after the cue starts, and about 3 of those seconds are the cue itself.
 
-Ava's silence does not depend on this prompt. The server mutes her call leg while the technician is in the room, so nobody hears her even if the model produces a reply. The prompt, together with the ElevenLabs **Skip turn** system tool, only stops her from generating replies into the void (they would show up in the transcript marked "muted, not heard").
+Iris's silence does not depend on this prompt. The server mutes her call leg while the technician is in the room, so nobody hears her even if the model produces a reply. The prompt, together with the ElevenLabs **Skip turn** system tool, only stops her from generating replies into the void (they would show up in the transcript marked "muted, not heard").
 
-**First-message override (optional here).** It is only used in one rare case: Ava's leg dropped during the search and no technician was found, so she is brought back with "Sorry, no technician is available right now. Can I take a message?" For that to work, enable overrides for **First message** in the agent's **Security** settings.
+**First-message override (optional here).** It is only used in one rare case: Iris's leg dropped during the search and no technician was found, so she is brought back with "Sorry, no technician is available right now. Can I take a message?" For that to work, enable overrides for **First message** in the agent's **Security** settings.
 
 ### 5. Run the server
 
@@ -160,7 +167,7 @@ If you can change the number's configuration: Twilio Console > Phone Numbers > y
 | `POST /start-call` | you (`X-Tool-Secret`) | Ring the resident. Body: `{"to": "+1..."}` |
 | `POST /twilio/outbound-answer` | Twilio | Resident answered an outbound call. Puts them in their room |
 | `POST /twilio/inbound` | Twilio | Resident called the number. Puts them in their room |
-| `POST /twilio/agent-leg` | Twilio (TwiML App) | Ava's leg. Calls register-call and returns the ElevenLabs stream TwiML |
+| `POST /twilio/agent-leg` | Twilio (TwiML App) | Iris's leg. Calls register-call and returns the ElevenLabs stream TwiML |
 | `POST /twilio/resident-status` | Twilio | Status of an outbound-started resident call. A hang-up cancels the search |
 | `POST /tool/request-transfer` | ElevenLabs (`X-Tool-Secret`) | Start the technician search. Body: `{"summary": "...", "call_sid": "CA..."}` |
 | `POST /tech/answered` | Twilio | Technician picked up. Plays the summary + "Press 1" prompt straight away |
@@ -168,13 +175,13 @@ If you can change the number's configuration: Twilio Console > Phone Numbers > y
 | `POST /tech/accept` | Twilio | Technician pressed a key. `1` wins the lock and joins the room |
 | `POST /tech/status` | Twilio | Technician call status: ringing, answered, busy, no-answer, failed, completed |
 | `POST /conference/status` | Twilio | Who joined and left the room, and the recording callback |
-| `POST /conference/announce` | Twilio | The line spoken to the room ("A technician has joined the call." / "No technician is available right now."), or with `kind=tech-update&tech=N` the cue played to Ava's leg only |
+| `POST /conference/announce` | Twilio | The line spoken to the room ("A technician has joined the call." / "No technician is available right now."), or with `kind=tech-update&tech=N` the cue played to Iris's leg only |
 | `GET /reports` | your browser, on this machine only | HTML table of all transfers, newest first |
 | `GET /reports/:sid` | your browser, on this machine only | Detail view for one resident call |
 | `GET /public/...` | Twilio | Optional audio files, such as `public/connecting.mp3` |
 | `GET /health` | anyone | Liveness check |
 
-There is no `/twilio/fallback` on this branch: Ava never leaves, so there is nothing to reconnect.
+There is no `/twilio/fallback` on this branch: Iris never leaves, so there is nothing to reconnect.
 
 All Twilio endpoints reject requests without a valid `X-Twilio-Signature` (HTTP 403). The two non-Twilio endpoints reject requests without the right `X-Tool-Secret` (HTTP 401). The report pages are refused (HTTP 403) for anything that arrives through the tunnel.
 
@@ -191,8 +198,8 @@ Each record holds the resident's number and call SID, the summary, the dial mode
 
 On this branch a record also holds:
 
-- `resident_updates`: one entry per technician update (technician position and number, the cue Ava heard, when it was sent). The detail page shows these in a **Resident told** column and as markers in the transcript.
-- `hold_periods` and `agent_mute_periods`: every stretch of hold music and of Ava being muted. There can be several in one search, because each update briefly ends both. `hold_started_at` / `hold_ended_at` and `agent_muted_at` / `agent_unmuted_at` are kept as the first start and the last end.
+- `resident_updates`: one entry per technician update (technician position and number, the cue Iris heard, when it was sent). The detail page shows these in a **Resident told** column and as markers in the transcript.
+- `hold_periods` and `agent_mute_periods`: every stretch of hold music and of Iris being muted. There can be several in one search, because each update briefly ends both. `hold_started_at` / `hold_ended_at` and `agent_muted_at` / `agent_unmuted_at` are kept as the first start and the last end.
 
 | Result | Meaning | Resident wait is measured to |
 | --- | --- | --- |
@@ -215,50 +222,50 @@ The report pages are only served to `localhost`, not through the ngrok URL, beca
 
 ### Call transcript
 
-The detail page of each report has a **Transcript** section: what Ava and the caller side said, in time order, with the key moments of the transfer placed in between ("Ava asked for a technician", "Technician ... joined the call"). The list page shows how many lines each transcript has.
+The detail page of each report has a **Transcript** section: what Iris and the caller side said, in time order, with the key moments of the transfer placed in between ("Iris asked for a technician", "Technician ... joined the call"). The list page shows how many lines each transcript has.
 
-- The transcript comes from ElevenLabs, which transcribes every conversation Ava has. The server looks the conversation up by the resident's call SID (the `call_sid` dynamic variable), so no extra setup is needed.
+- The transcript comes from ElevenLabs, which transcribes every conversation Iris has. The server looks the conversation up by the resident's call SID (the `call_sid` dynamic variable), so no extra setup is needed.
 - It is fetched automatically 5, 20 and 60 seconds after the call ends, and whenever you open the report page until ElevenLabs marks it as finished. Opening the page during a call shows what ElevenLabs has so far.
 - It is saved inside the report's JSON file (`transcript`), so it survives restarts. Old reports get their transcript the first time you open them.
-- Speakers are **Ava** and **Resident**. Ava hears the room as one audio stream, so after the technician joins, the caller-side lines are labelled **Resident or technician**: ElevenLabs cannot tell those two apart.
-- While the technician is on the call Ava is muted. If the model still produced a reply, it appears struck through as **Ava (muted, not heard)**: nobody on the call heard it.
-- Anything said after Ava has left the call is not in the transcript, because nothing is transcribing it. (On `main` that is the whole resident-technician conversation.) The Twilio recording still has the audio.
-- Only calls where Ava asked for a technician have a report, so only those have a transcript here.
+- Speakers are **Iris** and **Resident**. Iris hears the room as one audio stream, so after the technician joins, the caller-side lines are labelled **Resident or technician**: ElevenLabs cannot tell those two apart.
+- While the technician is on the call Iris is muted. If the model still produced a reply, it appears struck through as **Iris (muted, not heard)**: nobody on the call heard it.
+- Anything said after Iris has left the call is not in the transcript, because nothing is transcribing it. (On `main` that is the whole resident-technician conversation.) The Twilio recording still has the audio.
+- Only calls where Iris asked for a technician have a report, so only those have a transcript here.
 
 ## Hold music
 
 While technicians are being called, the resident hears music instead of silence.
 
-- It starts `HOLD_MUSIC_DELAY_SEC` seconds after the tool call (default `5`). The delay is there so Ava can finish saying "please hold" first: once the music starts, the resident cannot hear her. If her sentence gets cut off, raise the number; if there is a gap of silence before the music, lower it.
+- It starts `HOLD_MUSIC_DELAY_SEC` seconds after the tool call (default `5`). The delay is there so Iris can finish saying "please hold" first: once the music starts, the resident cannot hear her. If her sentence gets cut off, raise the number; if there is a gap of silence before the music, lower it.
 - The music is `HOLD_MUSIC_URL`: Twilio's classical hold music by default, or a link to your own `.mp3` or `.wav` file.
-- Ava is muted for the same period, so nothing she says is lost on a resident who cannot hear it.
-- The music stops when a technician joins, or when every technician has failed (Ava is then unmuted and talks to the resident again).
-- It also pauses for each [technician update](#technician-updates) and comes back `HOLD_MUSIC_RESUME_SEC` seconds later (default `10`). If Ava's update sentence gets cut off, raise it; if there is a silent gap before the music, lower it.
-- Set `HOLD_MUSIC_DELAY_SEC=off` to turn it off. Ava then keeps talking with the resident during the search, as before.
+- Iris is muted for the same period, so nothing she says is lost on a resident who cannot hear it.
+- The music stops when a technician joins, or when every technician has failed (Iris is then unmuted and talks to the resident again).
+- It also pauses for each [technician update](#technician-updates) and comes back `HOLD_MUSIC_RESUME_SEC` seconds later (default `10`). If Iris's update sentence gets cut off, raise it; if there is a silent gap before the music, lower it.
+- Set `HOLD_MUSIC_DELAY_SEC=off` to turn it off. Iris then keeps talking with the resident during the search, as before.
 - The report records `hold_started_at` and `hold_ended_at`, and the transcript shows both moments.
 
-How it is done: the resident is already in a conference with Ava, so the conference's own `waitUrl` music cannot be used (it only plays before a second person joins). Instead the server puts the resident's participant **on hold** with a `holdUrl`, which is Twilio's way of playing music to one person in a running conference.
+How it is done: the resident is already in a conference with Iris, so the conference's own `waitUrl` music cannot be used (it only plays before a second person joins). Instead the server puts the resident's participant **on hold** with a `holdUrl`, which is Twilio's way of playing music to one person in a running conference.
 
-One thing to check in ElevenLabs: while the resident is on hold, Ava hears silence. If the agent is set to end the call after a period of silence, that could drop her during a long search. She would be brought back with the fallback line if no technician is found, but it is simpler to leave that setting off or longer than your ring time for all technicians.
+One thing to check in ElevenLabs: while the resident is on hold, Iris hears silence. If the agent is set to end the call after a period of silence, that could drop her during a long search. She would be brought back with the fallback line if no technician is found, but it is simpler to leave that setting off or longer than your ring time for all technicians.
 
 ## Announcement audio
 
-When the technician joins, the room hears the spoken line "A technician has joined the call." To use a recording instead, save it as `public/connecting.mp3`; the server checks for the file each time. Ava listens for this line, so if you replace it with a recording, make the recording say the same words or change her prompt to match.
+When the technician joins, the room hears the spoken line "A technician has joined the call." To use a recording instead, save it as `public/connecting.mp3`; the server checks for the file each time. Iris listens for this line, so if you replace it with a recording, make the recording say the same words or change her prompt to match.
 
 ## Logs
 
 Every webhook is logged with its call SIDs and status fields. Lines worth knowing on this branch:
 
 ```
-RESIDENT resident=CA1f... -> room-CA1f..., Ava will be added
-AGENT adding Ava to room-CA1f... leg=CA7b...
+RESIDENT resident=CA1f... -> room-CA1f..., Iris will be added
+AGENT adding Iris to room-CA1f... leg=CA7b...
 REGISTER-CALL ok resident=CA1f... direction=outbound
 CONFERENCE agent joined room-CA1f... call=CA7b... (now 2 in the room)
 WINNER tech#0 +15550000001 call=CA9c... resident=CA1f...
 TECH tech#0 +15550000001 call=CA9c... -> no-answer (Twilio reported no-answer) resident=CA1f...
-UPDATE cue to Ava "Technician 1 did not pick up. Calling technician 2 now." in room-CA1f... +21.4s after tool call
-AGENT Ava unmuted in room-CA1f... (telling the resident technician 1 did not pick up)
-HOLD resident=CA1f... off hold (Ava is telling the resident technician 1 did not pick up)
+UPDATE cue to Iris "Technician 1 did not pick up. Calling technician 2 now." in room-CA1f... +21.4s after tool call
+AGENT Iris unmuted in room-CA1f... (telling the resident technician 1 did not pick up)
+HOLD resident=CA1f... off hold (Iris is telling the resident technician 1 did not pick up)
 DIAL tech#1 +15550000002 call=CA4d... resident=CA1f...
 HOLD resident=CA1f... on hold with music (searching for a technician)
 WINNER tech#1 +15550000002 call=CA4d... resident=CA1f...
@@ -275,18 +282,18 @@ Run these with real phones. Use at least two technician numbers, three for case 
 
 | # | Case | How to test | Expected |
 | --- | --- | --- | --- |
-| 1 | Ava joins | Start a call and answer as the resident | A second or two of silence, then Ava greets you. Log: `AGENT adding Ava`, `REGISTER-CALL ok`, `CONFERENCE agent joined` |
-| 2a | Hold music | Ask for a technician | Ava says "please hold", then music plays until a technician joins or the search fails. Log: `HOLD resident=... on hold with music`, `AGENT Ava muted` |
-| 2 | Accept, Ava silent | Ask for a technician; technician presses 1 | Music stops. Technician hears "Connecting you to the resident." Everyone hears "A technician has joined the call." Resident and technician talk; Ava is not heard, even if you speak to her. Log: `WINNER`, `CONFERENCE technician joined ... (now 3 in the room)`, `AGENT Ava muted`, `TRANSFER CONNECTED` |
-| 3 | Technician leaves, Ava remembers | Technician hangs up, then ask Ava something from earlier in the call | Log: `AGENT Ava unmuted`. She answers, from the same conversation |
-| 4 | Transcript | Open the report after the call | The resident-technician conversation is there; anything Ava produced while muted is struck through and marked "muted, not heard" |
-| 5 | Ava leaves | Have Ava end her conversation while the technician is on | Resident and technician stay connected |
-| 6 | Resident leaves | Resident hangs up | Call ends for the technician and Ava |
-| 7 | Decline | Technician 1 presses 2 (or hangs up) | Log: `-> declined`. Sequential: technician 2 rings. Resident is still with Ava |
-| 8 | No answer, Ava tells the resident | Let technician 1 ring out (about 20s) | Music stops; after a few seconds of silence Ava says technician 1 did not pick up and she is trying the next one. You must **not** hear the cue itself in a robot voice. About 10s later the music is back. Log: `-> no-answer`, `UPDATE cue to Ava`, `AGENT Ava unmuted`, `HOLD ... off hold`, then `DIAL tech#1` and later `HOLD ... on hold with music` |
-| 8b | Two updates | Let technicians 1 and 2 both ring out, technician 3 presses 1 | Ava gives the update twice (technician 1, then technician 2), then technician 3 joins. Report: two entries in **Resident told** |
+| 1 | Iris joins | Start a call and answer as the resident | A second or two of silence, then Iris greets you. Log: `AGENT adding Iris`, `REGISTER-CALL ok`, `CONFERENCE agent joined` |
+| 2a | Hold music | Ask for a technician | Iris says "please hold", then music plays until a technician joins or the search fails. Log: `HOLD resident=... on hold with music`, `AGENT Iris muted` |
+| 2 | Accept, Iris silent | Ask for a technician; technician presses 1 | Music stops. Technician hears "Connecting you to the resident." Everyone hears "A technician has joined the call." Resident and technician talk; Iris is not heard, even if you speak to her. Log: `WINNER`, `CONFERENCE technician joined ... (now 3 in the room)`, `AGENT Iris muted`, `TRANSFER CONNECTED` |
+| 3 | Technician leaves, Iris remembers | Technician hangs up, then ask Iris something from earlier in the call | Log: `AGENT Iris unmuted`. She answers, from the same conversation |
+| 4 | Transcript | Open the report after the call | The resident-technician conversation is there; anything Iris produced while muted is struck through and marked "muted, not heard" |
+| 5 | Iris leaves | Have Iris end her conversation while the technician is on | Resident and technician stay connected |
+| 6 | Resident leaves | Resident hangs up | Call ends for the technician and Iris |
+| 7 | Decline | Technician 1 presses 2 (or hangs up) | Log: `-> declined`. Sequential: technician 2 rings. Resident is still with Iris |
+| 8 | No answer, Iris tells the resident | Let technician 1 ring out (about 20s) | Music stops; after a few seconds of silence Iris says technician 1 did not pick up and she is trying the next one. You must **not** hear the cue itself in a robot voice. About 10s later the music is back. Log: `-> no-answer`, `UPDATE cue to Iris`, `AGENT Iris unmuted`, `HOLD ... off hold`, then `DIAL tech#1` and later `HOLD ... on hold with music` |
+| 8b | Two updates | Let technicians 1 and 2 both ring out, technician 3 presses 1 | Iris gives the update twice (technician 1, then technician 2), then technician 3 joins. Report: two entries in **Resident told** |
 | 9 | Voicemail | Let technician 1's voicemail pick up | Log: `AnsweredBy=machine_start`, `-> voicemail`, `CANCEL ... sent status=completed` |
-| 10 | All fail | Every technician declines or does not answer | An update after each technician except the last. Then music stops, everyone hears "No technician is available right now." and Ava offers to take a message, in the same conversation. Log: `TRANSFER NO TECHNICIAN`, `ANNOUNCE` |
+| 10 | All fail | Every technician declines or does not answer | An update after each technician except the last. Then music stops, everyone hears "No technician is available right now." and Iris offers to take a message, in the same conversation. Log: `TRANSFER NO TECHNICIAN`, `ANNOUNCE` |
 | 11 | Resident hangs up while waiting | Resident hangs up while a technician phone is ringing | Log: `RESIDENT gone`, `CANCEL ... (resident hung up)`, `TRANSFER RESIDENT HUNG UP`. The technician phone stops ringing and no update is given |
 
 After each case, open http://localhost:3000/reports and check the result, the outcomes and the wait time.
@@ -301,14 +308,14 @@ That checks the server's decisions. It does not prove behaviour on a real call; 
 
 ## What has and has not been checked on real calls
 
-A real call on this branch has connected: Ava joined the room through the TwiML App, called the tool, and a technician joined (the saved report shows `connected`). The points below still depend on listening to a call rather than reading a report:
+A real call on this branch has connected: Iris joined the room through the TwiML App, called the tool, and a technician joined (the saved report shows `connected`). The points below still depend on listening to a call rather than reading a report:
 
-- **Response delay.** Ava's audio passes through the conference mixer and an extra call leg, so her replies will be somewhat slower than on `main`, for the whole call.
-- **Muting on a real call.** The mute is sent the moment Twilio reports the technician in the room, which takes a fraction of a second. If Ava happens to be mid-sentence she is cut off, and a syllable may get through before the mute lands. Check the log for `AGENT Ava muted` and listen on the first call.
-- **What Ava does while muted.** She still hears both people and may keep generating replies that nobody hears. They cost ElevenLabs usage and clutter the transcript; the prompt and the Skip turn tool reduce this.
-- **Which resident the leg is for.** The server passes the resident's call SID to the TwiML App as a custom parameter. If Twilio does not deliver it, the server falls back to "the one call currently waiting for Ava", which is right as long as two calls do not start at the same instant.
-- **If Ava never speaks**, look for `ERROR could not add Ava` or `ERROR /twilio/agent-leg` in the log.
-- **Technician updates (this branch) have not been tried on a real call yet.** Three things to listen for: that the resident does not hear the cue (it is sent to Ava's participant only, which is Twilio's documented behaviour but not yet heard here); that Ava breaks out of her skip_turn loop to give the update; and whether `HOLD_MUSIC_RESUME_SEC=10` suits her sentence.
+- **Response delay.** Iris's audio passes through the conference mixer and an extra call leg, so her replies will be somewhat slower than on `main`, for the whole call.
+- **Muting on a real call.** The mute is sent the moment Twilio reports the technician in the room, which takes a fraction of a second. If Iris happens to be mid-sentence she is cut off, and a syllable may get through before the mute lands. Check the log for `AGENT Iris muted` and listen on the first call.
+- **What Iris does while muted.** She still hears both people and may keep generating replies that nobody hears. They cost ElevenLabs usage and clutter the transcript; the prompt and the Skip turn tool reduce this.
+- **Which resident the leg is for.** The server passes the resident's call SID to the TwiML App as a custom parameter. If Twilio does not deliver it, the server falls back to "the one call currently waiting for Iris", which is right as long as two calls do not start at the same instant.
+- **If Iris never speaks**, look for `ERROR could not add Iris` or `ERROR /twilio/agent-leg` in the log.
+- **Technician updates (this branch) have not been tried on a real call yet.** Three things to listen for: that the resident does not hear the cue (it is sent to Iris's participant only, which is Twilio's documented behaviour but not yet heard here); that Iris breaks out of her skip_turn loop to give the update; and whether `HOLD_MUSIC_RESUME_SEC=10` suits her sentence.
 
 ## Trial accounts and Geo Permissions
 
@@ -324,20 +331,20 @@ Twilio blocks outbound calls to countries that are not enabled. Enable the count
 ## Things to know
 
 - **Live call state is in memory.** Restarting the server forgets calls that are in progress (saved reports are kept).
-- **One search per call.** If Ava calls `request_transfer` again on the same call, she is told a search is already running, that a technician is on the call, or that nobody is available.
+- **One search per call.** If Iris calls `request_transfer` again on the same call, she is told a search is already running, that a technician is on the call, or that nobody is available.
 - **Answering-machine detection is asynchronous.** The summary starts the moment the call is picked up. Only a `machine` or `fax` result does anything: that call is hung up and counted as `voicemail`. A technician who answers with a long greeting can be misclassified.
 - **One technician at a time.** There is no parallel calling on this branch. `DIAL_MODE` in `.env` is not used; keep it at `sequential`, which every branch accepts (`main` and `agent-stays-on-call` refuse to start on any value other than `sequential` or `parallel`). Any other value prints a startup warning here.
 - **Shared ngrok account.** If the ngrok authtoken belongs to someone else, only one of you can have the tunnel open at a time, and the requests (phone numbers, summaries, the `X-Tool-Secret` header) can be seen in that account's ngrok dashboard.
-- **Cost.** Ava's leg is an extra call leg that lasts the whole call, in addition to the resident's and the technician's.
-- **Recording.** The conference is recorded from the first second, so the recording includes the resident's conversation with Ava. Check the consent rules that apply to you.
+- **Cost.** Iris's leg is an extra call leg that lasts the whole call, in addition to the resident's and the technician's.
+- **Recording.** The conference is recorded from the first second, so the recording includes the resident's conversation with Iris. Check the consent rules that apply to you.
 
 ## Switching between versions
 
-| Branch | Ava | Technicians |
+| Branch | Iris | Technicians |
 | --- | --- | --- |
 | `main` | hands over and leaves | `DIAL_MODE`: sequential or parallel |
 | `agent-stays-on-call` | stays on the call, muted | `DIAL_MODE`: sequential or parallel |
-| `sequential-with-updates` | stays on the call, muted | one at a time, Ava tells the resident about each one that does not pick up |
+| `sequential-with-updates` | stays on the call, muted | one at a time, Iris tells the resident about each one that does not pick up |
 
 ```powershell
 git switch main
@@ -345,7 +352,7 @@ git switch agent-stays-on-call
 git switch sequential-with-updates
 ```
 
-Restart the server after switching. `.env` and `reports/` are not tracked by git, so they stay as they are on every branch. `main` ignores `TWILIO_AGENT_APP_SID`. The ElevenLabs system prompt above is written for this branch; on the other two branches Ava never hears the technician-update cue, so the extra paragraph does nothing there.
+Restart the server after switching. `.env` and `reports/` are not tracked by git, so they stay as they are on every branch. `main` ignores `TWILIO_AGENT_APP_SID`. The ElevenLabs system prompt above is written for this branch; on the other two branches Iris never hears the technician-update cue, so the extra paragraph does nothing there.
 
 ## Files
 
@@ -357,5 +364,5 @@ Restart the server after switching. `.env` and `reports/` are not tracked by git
 - [src/config.js](src/config.js): reads and checks environment variables
 - [scripts/start-call.js](scripts/start-call.js): helper for `/start-call`
 - [scripts/tunnel.js](scripts/tunnel.js): starts ngrok and writes `PUBLIC_BASE_URL` into `.env`
-- [scripts/setup-agent-app.js](scripts/setup-agent-app.js): creates or updates the TwiML App for Ava's leg
+- [scripts/setup-agent-app.js](scripts/setup-agent-app.js): creates or updates the TwiML App for Iris's leg
 - [test/](test/): simulated webhook tests (`npm test`)

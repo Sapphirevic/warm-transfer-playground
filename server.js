@@ -26,10 +26,10 @@ const { app } = createApp({
 app.listen(config.port, () => {
   console.log(`Warm-transfer playground listening on http://localhost:${config.port}`);
   console.log(`  public URL  : ${config.publicBaseUrl}`);
-  console.log('  dial mode   : one at a time, in this order; Ava tells the resident each time one does not pick up');
+  console.log('  dial mode   : one at a time, in this order; Iris tells the resident each time one does not pick up');
   console.log(`  technicians : ${config.techNumbers.join(', ')}`);
   console.log(`  ring timeout: ${config.ringTimeoutSec}s`);
-  console.log(`  transfer    : agent stays on the call (Ava leg via TwiML App ${config.agentAppSid})`);
+  console.log(`  transfer    : agent stays on the call (Iris leg via TwiML App ${config.agentAppSid})`);
   console.log(`  hold music  : ${config.holdDelayMs === null
     ? 'off'
     : `starts ${config.holdDelayMs / 1000}s after the tool call, back ${config.holdResumeMs / 1000}s after each update`}`);

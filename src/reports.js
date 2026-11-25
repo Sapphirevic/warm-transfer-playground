@@ -56,7 +56,7 @@ function buildReport(t) {
     // Technicians are always called one at a time on this branch (kept so reports from
     // other branches can be compared in the same list).
     dial_mode: 'sequential',
-    // This branch keeps Ava in the room; on main she leaves when the technician joins.
+    // This branch keeps Iris in the room; on main she leaves when the technician joins.
     transfer_style: 'agent stays on the call',
     started_at: iso(start),
     finished_at: iso(t.finishedAt),
@@ -65,16 +65,16 @@ function buildReport(t) {
     connected_technician: t.result === 'connected' && winner ? winner.number : null,
     resident_wait_seconds: after(t.finishedAt),
     // The resident hears hold music while technicians are being called, with a break each
-    // time Ava tells them a technician did not pick up.
+    // time Iris tells them a technician did not pick up.
     hold_started_at: firstFrom(t.holdPeriods),
     hold_ended_at: lastTo(t.holdPeriods),
     hold_periods: periods(t.holdPeriods),
-    // Ava is muted (listening, not heard) during the hold and while the technician is in the room.
+    // Iris is muted (listening, not heard) during the hold and while the technician is in the room.
     agent_muted_at: firstFrom(t.mutePeriods),
     agent_unmuted_at: lastTo(t.mutePeriods),
     agent_mute_periods: periods(t.mutePeriods),
-    // Each time a technician did not take the call and the next one was called, Ava was
-    // cued to tell the resident. `cue` is what Ava heard; the resident heard Ava's reply.
+    // Each time a technician did not take the call and the next one was called, Iris was
+    // cued to tell the resident. `cue` is what Iris heard; the resident heard Iris's reply.
     resident_updates: (t.residentUpdates || []).map((u) => ({
       technician: u.tech + 1,
       number: t.techs[u.tech].number,
@@ -206,7 +206,7 @@ function renderList(reports) {
 </tr>`);
 
   return page('Transfer reports', `<h1>Transfer reports (${reports.length})</h1>
-${reports.length === 0 ? '<p>No transfers yet. A report appears here as soon as Ava calls request_transfer.</p>' : `<div class="wrap"><table>
+${reports.length === 0 ? '<p>No transfers yet. A report appears here as soon as Iris calls request_transfer.</p>' : `<div class="wrap"><table>
 <tr><th>Started</th><th>Resident</th><th>Mode</th><th>Agent</th><th>Result</th><th>Resident waited</th><th>Technicians</th><th>Summary</th><th>Transcript</th><th>Call SID</th></tr>
 ${rows.join('\n')}
 </table></div>`}`);
@@ -233,7 +233,7 @@ function renderTranscript(r) {
 
   // ElevenLabs' clock and this server's clock can be a minute or more apart, so its
   // timestamps cannot be compared with ours as they are. One moment is known on both
-  // clocks: when Ava called the transfer tool. ElevenLabs says how many seconds into the
+  // clocks: when Iris called the transfer tool. ElevenLabs says how many seconds into the
   // conversation that was, and the report's started_at is when the server received it.
   // Every line is placed relative to that.
   const first = transcript.conversations[0];
@@ -248,10 +248,10 @@ function renderTranscript(r) {
 
   const rows = [];
   transcript.conversations.forEach((conversation, index) => {
-    if (index > 0) rows.push({ at: onOurClock(conversation, { seconds: 0 }), role: 'marker', text: 'Ava rejoined the call (new ElevenLabs conversation)' });
+    if (index > 0) rows.push({ at: onOurClock(conversation, { seconds: 0 }), role: 'marker', text: 'Iris rejoined the call (new ElevenLabs conversation)' });
     rows.push(...conversation.entries.map((entry) => ({ ...entry, at: onOurClock(conversation, entry) })));
   });
-  rows.push({ at: r.started_at, role: 'marker', text: 'Ava asked for a technician (request_transfer)' });
+  rows.push({ at: r.started_at, role: 'marker', text: 'Iris asked for a technician (request_transfer)' });
   const joinedAt = r.result === 'connected' ? r.finished_at : null;
   if (r.result && r.finished_at) {
     const ending = {
@@ -269,11 +269,11 @@ function renderTranscript(r) {
     if (p.to) rows.push({ at: p.to, role: 'marker', text: 'Resident taken off hold' });
   }
   for (const p of mutePeriods) {
-    rows.push({ at: p.from, role: 'marker', text: 'Ava muted: she keeps listening but nobody hears her' });
-    if (p.to) rows.push({ at: p.to, role: 'marker', text: 'Ava unmuted' });
+    rows.push({ at: p.from, role: 'marker', text: 'Iris muted: she keeps listening but nobody hears her' });
+    if (p.to) rows.push({ at: p.to, role: 'marker', text: 'Iris unmuted' });
   }
   for (const u of r.resident_updates || []) {
-    rows.push({ at: u.at, role: 'marker', text: `Technician ${u.technician} (${u.number}) did not take the call: Ava cued to tell the resident` });
+    rows.push({ at: u.at, role: 'marker', text: `Technician ${u.technician} (${u.number}) did not take the call: Iris cued to tell the resident` });
   }
   rows.sort((a, b) => String(a.at || '9').localeCompare(String(b.at || '9')));
 
@@ -283,8 +283,8 @@ function renderTranscript(r) {
   // ElevenLabs hears one audio stream, so once the technician is in the room it
   // cannot tell the resident and the technician apart.
   const speaker = (row) => {
-    if (row.role === 'agent') return whileMuted(row) ? 'Ava (muted, not heard)' : 'Ava';
-    if (row.role === 'tool') return 'Ava (tool)';
+    if (row.role === 'agent') return whileMuted(row) ? 'Iris (muted, not heard)' : 'Iris';
+    if (row.role === 'tool') return 'Iris (tool)';
     if (joinedAt && row.at && row.at >= joinedAt && r.transfer_style) return 'Resident or technician';
     return 'Resident';
   };
@@ -300,7 +300,7 @@ function renderTranscript(r) {
 ${notes.map((note) => `<p class="note">${note}</p>`).join('\n')}
 ${summaries.join('\n')}
 ${lines === 0 && notes.length === 0 ? '<p>ElevenLabs returned no spoken lines for this call.</p>' : ''}
-${lines === 0 ? '' : `<p>Times are UTC. ${r.transfer_style ? 'After the technician joins, ElevenLabs hears the resident and the technician as one voice, so those lines are labelled "Resident or technician". Ava is muted while the resident is on hold and while the technician is on the call: lines marked "muted, not heard" are things the model produced that nobody on the call heard.' : 'Ava leaves when the technician joins, so the conversation between the resident and the technician is not included.'}</p>
+${lines === 0 ? '' : `<p>Times are UTC. ${r.transfer_style ? 'After the technician joins, ElevenLabs hears the resident and the technician as one voice, so those lines are labelled "Resident or technician". Iris is muted while the resident is on hold and while the technician is on the call: lines marked "muted, not heard" are things the model produced that nobody on the call heard.' : 'Iris leaves when the technician joins, so the conversation between the resident and the technician is not included.'}</p>
 <div class="wrap"><table class="transcript">
 <tr><th>Time</th><th>Speaker</th><th>Said</th></tr>
 ${body.join('\n')}

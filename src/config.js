@@ -76,13 +76,13 @@ function loadConfig(env = process.env) {
     techNumbers,
     warnings,
     ringTimeoutSec: Number(env.RING_TIMEOUT_SEC) || 20,
-    // TwiML App whose Voice URL is PUBLIC_BASE_URL/twilio/agent-leg. Ava joins the call through it.
+    // TwiML App whose Voice URL is PUBLIC_BASE_URL/twilio/agent-leg. Iris joins the call through it.
     agentAppSid,
     // Hold music for the resident while technicians are called. It starts this long after
-    // the tool call, so Ava can finish saying "please hold". null = no hold music.
+    // the tool call, so Iris can finish saying "please hold". null = no hold music.
     holdDelayMs,
-    // When a technician does not take the call, the resident comes off hold so Ava can tell
-    // them. This is how long after that the music starts again (and Ava is muted again).
+    // When a technician does not take the call, the resident comes off hold so Iris can tell
+    // them. This is how long after that the music starts again (and Iris is muted again).
     holdResumeMs,
     holdMusicUrl: (env.HOLD_MUSIC_URL || 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical').trim(),
     // After a call ends, when to ask ElevenLabs for the transcript (it takes a moment to be ready).

@@ -14,6 +14,24 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-25 - agent renamed to Iris (v0.2.1)
+
+**D10. The agent is called Iris, not Ava.**
+Requested by the team. The README, logs, report and transcript labels, comments and tests on this branch now say "Iris". The Twilio participant label changed from `ava-N` to `iris-N`. Entries below this one keep "Ava" because they record what happened at the time.
+
+**D11. A new ElevenLabs agent replaces "Ava Transfer Lab".**
+This fixes the open item about the misconfigured agent. Settings:
+- First message "Hi, this is Iris. How can I help you today?", with no greeting line in the prompt, so she doesn't greet twice.
+- The D9 prompt, renamed to Iris.
+- μ-law 8000 Hz in both directions.
+- Exactly one webhook tool, `request_transfer`, with `summary` filled by the LLM and `call_sid` as a dynamic variable, both required.
+- skip_turn on; transfer_to_number and end_call off.
+- First-message override allowed.
+- "End conversation after silence" −1 (off). "Take turn after silence" −1, so Iris is not prodded every 7 seconds while on hold or after an update.
+- Max duration 600 seconds, kept as a cost cap.
+
+Waiting for the new agent ID in `.env`, and a read-back check.
+
 ### 2026-11-25 - `sequential-with-updates` (v0.2.0)
 
 **D1. No parallel calling on this branch.**

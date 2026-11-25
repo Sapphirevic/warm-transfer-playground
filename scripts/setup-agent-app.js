@@ -2,7 +2,7 @@
 
 // Usage: node scripts/setup-agent-app.js
 //
-// Ava joins the call as her own leg. Twilio reaches that leg through a TwiML App
+// Iris joins the call as her own leg. Twilio reaches that leg through a TwiML App
 // whose Voice URL is PUBLIC_BASE_URL/twilio/agent-leg. This script creates that
 // TwiML App in your Twilio account (or updates its URL if TWILIO_AGENT_APP_SID is
 // already set) and writes the SID into .env. Run it again whenever PUBLIC_BASE_URL changes.
@@ -32,7 +32,7 @@ const voiceUrl = `${publicBaseUrl}/twilio/agent-leg`;
   }
 
   const created = await client.applications.create({
-    friendlyName: 'Warm transfer playground - Ava leg',
+    friendlyName: 'Warm transfer playground - Iris leg',
     voiceUrl,
     voiceMethod: 'POST',
   });

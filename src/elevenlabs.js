@@ -67,7 +67,7 @@ function createConversationApi(config) {
 
   return {
     // Full details (including the transcript) of every conversation that belongs to one
-    // resident call. Usually one; two if Ava had to be brought back during the call.
+    // resident call. Usually one; two if Iris had to be brought back during the call.
     async forCall(callSid, startedAfterUnix) {
       let page;
       try {

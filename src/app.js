@@ -1,16 +1,16 @@
 'use strict';
 
-// Branch "agent-stays-on-call": the resident, Ava and the technician share one
-// Twilio conference. The resident is in the room from the first second, Ava is
+// Branch "agent-stays-on-call": the resident, Iris and the technician share one
+// Twilio conference. The resident is in the room from the first second, Iris is
 // added to it as her own call leg (a TwiML App that returns the ElevenLabs
 // register-call TwiML), and a technician who presses 1 simply joins the same room.
-// Nobody is moved, so Ava's conversation carries on while the technician is there.
-// While the technician is in the room Ava is muted: she listens but is not heard.
+// Nobody is moved, so Iris's conversation carries on while the technician is there.
+// While the technician is in the room Iris is muted: she listens but is not heard.
 //
 // Branch "sequential-with-updates": technicians are called strictly one at a time, in
 // TECH_NUMBERS order. When one does not take the call, the server plays a short cue to
-// Ava's leg only ("Technician 1 did not pick up. Calling technician 2 now."), takes the
-// resident off hold and unmutes Ava, so she can tell the resident in her own words.
+// Iris's leg only ("Technician 1 did not pick up. Calling technician 2 now."), takes the
+// resident off hold and unmutes Iris, so she can tell the resident in her own words.
 // HOLD_MUSIC_RESUME_SEC later the music comes back while the next technician is called.
 
 const crypto = require('crypto');
@@ -28,15 +28,15 @@ const CALL_ENDED = new Set(['completed', 'busy', 'no-answer', 'failed', 'cancele
 const MAX_PROMPTS = 3;
 const FALLBACK_FIRST_MESSAGE = 'Sorry, no technician is available right now. Can I take a message?';
 const TECH_ANNOUNCEMENT = 'Connecting you to the resident.';
-// Spoken into the room for everyone. Ava hears them like anything else said on the
+// Spoken into the room for everyone. Iris hears them like anything else said on the
 // call, so her prompt can react to these exact phrases.
 const ANNOUNCEMENTS = {
   joined: 'A technician has joined the call.',
   unavailable: 'No technician is available right now.',
 };
-// Played to Ava's leg only (the resident does not hear it) when technician i (0-based)
-// did not take the call and another one is about to be called. Ava's prompt reacts to it.
-// Numbers, not phone numbers, so Ava has nothing private to read out.
+// Played to Iris's leg only (the resident does not hear it) when technician i (0-based)
+// did not take the call and another one is about to be called. Iris's prompt reacts to it.
+// Numbers, not phone numbers, so Iris has nothing private to read out.
 const techUpdateLine = (i) => `Technician ${i + 1} did not pick up. Calling technician ${i + 2} now.`;
 const LOGGED_FIELDS = [
   'CallSid', 'ParentCallSid', 'CallStatus', 'Direction', 'From', 'To', 'AnsweredBy', 'MachineDetectionDuration',
@@ -179,7 +179,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const fetching = (async () => {
       let transcript;
       try {
-        // Ava's conversation starts before the tool call, so look back generously.
+        // Iris's conversation starts before the tool call, so look back generously.
         const startedAfter = Math.floor(Date.parse(stored.started_at) / 1000) - 6 * 3600;
         transcript = buildTranscript(await conversations.forCall(residentCallSid, startedAfter));
         const lines = transcript.conversations.reduce((n, c) => n + c.entries.length, 0);
@@ -244,7 +244,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   }
 
   // The shared room. Only the resident ends it by leaving: if the technician hangs up
-  // the resident is still with Ava, and if Ava drops the resident and technician carry on.
+  // the resident is still with Iris, and if Iris drops the resident and technician carry on.
   function conferenceTwiml(residentCallSid, { say, endConferenceOnExit }) {
     const callback = `${base}/conference/status?resident=${residentCallSid}`;
     const vr = new VoiceResponse();
@@ -254,9 +254,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         startConferenceOnEnter: true,
         endConferenceOnExit,
         beep: false,
-        // Silence instead of hold music for the second or two before Ava joins.
+        // Silence instead of hold music for the second or two before Iris joins.
         waitUrl: '',
-        // Ava's replies now pass through the conference mixer, so keep its buffering low.
+        // Iris's replies now pass through the conference mixer, so keep its buffering low.
         jitterBufferSize: 'small',
         record: 'record-from-start',
         recordingStatusCallback: callback,
@@ -278,9 +278,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     sendTwiml(res, vr);
   }
 
-  // ---------------------------------------------------------------- Ava's leg
+  // ---------------------------------------------------------------- Iris's leg
 
-  // Adds Ava to the resident's room as a separate call leg. Twilio "calls" our TwiML
+  // Adds Iris to the resident's room as a separate call leg. Twilio "calls" our TwiML
   // App, which asks /twilio/agent-leg for TwiML, and that returns the ElevenLabs stream.
   async function addAgent(residentCallSid, { firstMessage = null } = {}) {
     const resident = residentCalls.get(residentCallSid);
@@ -295,17 +295,17 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       const participant = await client.conferences(resident.conferenceSid).participants.create({
         from: config.twilioPhoneNumber,
         to: `app:${config.agentAppSid}?resident=${residentCallSid}`,
-        label: `ava-${agent.joins}`,
+        label: `iris-${agent.joins}`,
         beep: 'false',
         startConferenceOnEnter: true,
         endConferenceOnExit: false,
         jitterBufferSize: 'off',
       });
       if (!agent.callSid) agent.callSid = participant.callSid;
-      log(`AGENT adding Ava to ${roomName(residentCallSid)} leg=${participant.callSid}${firstMessage ? ' with first-message override' : ''}`);
+      log(`AGENT adding Iris to ${roomName(residentCallSid)} leg=${participant.callSid}${firstMessage ? ' with first-message override' : ''}`);
     } catch (err) {
       agent.state = 'none';
-      log(`ERROR could not add Ava to the call resident=${residentCallSid}: ${twilioError(err)}`);
+      log(`ERROR could not add Iris to the call resident=${residentCallSid}: ${twilioError(err)}`);
       const vr = new VoiceResponse();
       vr.say('Sorry, we are having trouble connecting you right now. Please try again later.');
       vr.hangup();
@@ -313,16 +313,16 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     }
   }
 
-  // Which resident call is this Ava leg for? Normally the custom parameter says so.
+  // Which resident call is this Iris leg for? Normally the custom parameter says so.
   function residentForAgentLeg(body) {
     const named = body.resident || body.Param_resident;
     if (named && residentCalls.has(named)) return named;
-    // Fallback if Twilio did not pass the parameter through: the one call waiting for Ava.
+    // Fallback if Twilio did not pass the parameter through: the one call waiting for Iris.
     const waiting = [...residentCalls].filter(([, call]) => !call.ended && call.agent.state === 'joining');
     return waiting.length === 1 ? waiting[0][0] : null;
   }
 
-  // Voice URL of the TwiML App. Returns the ElevenLabs <Connect><Stream> for Ava's leg.
+  // Voice URL of the TwiML App. Returns the ElevenLabs <Connect><Stream> for Iris's leg.
   app.post('/twilio/agent-leg', twilioHook, wrap(async (req, res) => {
     const residentCallSid = residentForAgentLeg(req.body);
     const resident = residentCallSid && residentCalls.get(residentCallSid);
@@ -337,7 +337,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         fromNumber: outbound ? resident.twilioNumber : resident.number,
         toNumber: outbound ? resident.number : resident.twilioNumber,
         direction: resident.direction,
-        // Ava's {{call_sid}} is the resident's call, which is what request_transfer needs.
+        // Iris's {{call_sid}} is the resident's call, which is what request_transfer needs.
         callSid: residentCallSid,
         firstMessage,
       });
@@ -345,12 +345,12 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       res.type('text/xml').send(xml);
     } catch (err) {
       log(`ERROR register-call failed resident=${residentCallSid}: ${err.message}`);
-      // Spoken on Ava's leg, so the resident hears it in the room.
+      // Spoken on Iris's leg, so the resident hears it in the room.
       sayAndHangup(res, 'Sorry, we are having trouble connecting you right now. Please try again later.');
     }
   }));
 
-  // While a technician is in the room Ava must not be heard. Muting her leg guarantees
+  // While a technician is in the room Iris must not be heard. Muting her leg guarantees
   // that whatever the model decides to say. She still hears everything, so her
   // transcript keeps covering the conversation. Resolves to true if the change was made.
   function setAgentMuted(residentCallSid, muted, why) {
@@ -362,18 +362,18 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     return inOrder(resident, async () => {
       try {
         await client.conferences(resident.conferenceSid).participants(agent.callSid).update({ muted });
-        log(`AGENT Ava ${muted ? 'muted' : 'unmuted'} in ${roomName(residentCallSid)} (${why})`);
+        log(`AGENT Iris ${muted ? 'muted' : 'unmuted'} in ${roomName(residentCallSid)} (${why})`);
         recordPeriod(residentCallSid, 'mutePeriods', muted);
         return true;
       } catch (err) {
         agent.muted = !muted;
-        log(`ERROR could not ${muted ? 'mute' : 'unmute'} Ava in ${roomName(residentCallSid)}: ${twilioError(err)}`);
+        log(`ERROR could not ${muted ? 'mute' : 'unmute'} Iris in ${roomName(residentCallSid)}: ${twilioError(err)}`);
         return false;
       }
     });
   }
 
-  // Ava can be muted and unmuted, and the resident put on hold and taken off it, several
+  // Iris can be muted and unmuted, and the resident put on hold and taken off it, several
   // times in one search (once per technician update). Each change that Twilio accepted
   // opens or closes a period on the transfer, so the report knows exactly when.
   function recordPeriod(residentCallSid, field, on) {
@@ -416,9 +416,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     });
   }
 
-  // A few seconds after Ava asks for a technician (long enough for her to say
+  // A few seconds after Iris asks for a technician (long enough for her to say
   // "please hold"), and again a few seconds after each technician update, the resident
-  // gets music and Ava is muted. Only while the search is still running.
+  // gets music and Iris is muted. Only while the search is still running.
   function startHold(t) {
     t.holdTimer = null;
     if (t.status !== 'searching') return;
@@ -439,7 +439,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
   // Plays a short line (or public/connecting.mp3) to everyone in the room.
   // Queued behind any pending hold or mute change, so the resident is off hold (and
-  // Ava silenced or given her voice back) before the line is spoken.
+  // Iris silenced or given her voice back) before the line is spoken.
   function announce(residentCallSid, kind) {
     const resident = residentCalls.get(residentCallSid);
     if (!resident || !resident.conferenceSid) return;
@@ -460,18 +460,18 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   });
 
   // Technician i did not take the call and technician i+1 is about to be called.
-  // The cue goes to Ava's leg only: the resident never hears it, they hear Ava say it.
-  //   1. cue to Ava ("Technician 1 did not pick up. Calling technician 2 now.")
-  //   2. Ava unmuted and the resident taken off hold, while the cue is still playing,
+  // The cue goes to Iris's leg only: the resident never hears it, they hear Iris say it.
+  //   1. cue to Iris ("Technician 1 did not pick up. Calling technician 2 now.")
+  //   2. Iris unmuted and the resident taken off hold, while the cue is still playing,
   //      so both are ready by the time she answers it
-  //   3. HOLD_MUSIC_RESUME_SEC later: music on and Ava muted again, unless the search
+  //   3. HOLD_MUSIC_RESUME_SEC later: music on and Iris muted again, unless the search
   //      has ended by then (a technician accepted, or nobody is left)
   function updateResident(t, i) {
     const resident = residentCalls.get(t.residentCallSid);
     if (!resident || resident.ended || !resident.conferenceSid) return;
     const { agent } = resident;
     if (agent.state !== 'in' || !agent.callSid) {
-      log(`UPDATE skipped for tech#${i}: Ava is not in ${roomName(t.residentCallSid)} to tell the resident`);
+      log(`UPDATE skipped for tech#${i}: Iris is not in ${roomName(t.residentCallSid)} to tell the resident`);
       return;
     }
 
@@ -483,10 +483,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
     inOrder(resident, () => client.conferences(resident.conferenceSid).participants(agent.callSid)
       .update({ announceUrl: `${base}/conference/announce?kind=tech-update&tech=${i}`, announceMethod: 'POST' })
-      .then(() => log(`UPDATE cue to Ava "${techUpdateLine(i)}" in ${roomName(t.residentCallSid)} +${secs(t.startedAt, at)} after tool call`))
-      .catch((err) => log(`ERROR could not send the technician update cue to Ava in ${roomName(t.residentCallSid)}: ${twilioError(err)}`)));
+      .then(() => log(`UPDATE cue to Iris "${techUpdateLine(i)}" in ${roomName(t.residentCallSid)} +${secs(t.startedAt, at)} after tool call`))
+      .catch((err) => log(`ERROR could not send the technician update cue to Iris in ${roomName(t.residentCallSid)}: ${twilioError(err)}`)));
     setAgentMuted(t.residentCallSid, false, `telling the resident technician ${i + 1} did not pick up`);
-    endHold(t, `Ava is telling the resident technician ${i + 1} did not pick up`);
+    endHold(t, `Iris is telling the resident technician ${i + 1} did not pick up`);
 
     if (config.holdDelayMs !== null) scheduleHold(t, config.holdResumeMs);
   }
@@ -602,7 +602,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     dialNext(t);
   }
 
-  // Nobody took it. Ava is normally still in the room, so she is told by an
+  // Nobody took it. Iris is normally still in the room, so she is told by an
   // announcement; if her leg has dropped she is brought back with the fallback line.
   function noTechnician(t) {
     t.status = 'failed';
@@ -611,13 +611,13 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
     const resident = residentCalls.get(t.residentCallSid);
     if (!resident || resident.ended) return;
-    // The resident goes back to talking with Ava: music off, Ava's voice back on.
+    // The resident goes back to talking with Iris: music off, Iris's voice back on.
     endHold(t, 'no technician available');
     if (resident.agent.state === 'in' || resident.agent.state === 'joining') {
       setAgentMuted(t.residentCallSid, false, 'no technician available');
       announce(t.residentCallSid, 'unavailable');
     } else {
-      log(`AGENT Ava is not in the room, bringing her back for resident=${t.residentCallSid}`);
+      log(`AGENT Iris is not in the room, bringing her back for resident=${t.residentCallSid}`);
       addAgent(t.residentCallSid, { firstMessage: FALLBACK_FIRST_MESSAGE });
     }
   }
@@ -685,10 +685,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     res.json({ status: 'calling', call_sid: call.sid });
   }));
 
-  // Both ways in put the resident straight into their own room. Ava is added as soon
+  // Both ways in put the resident straight into their own room. Iris is added as soon
   // as Twilio reports the resident has joined (see /conference/status).
   function residentIntoRoom(res, residentCallSid) {
-    log(`RESIDENT resident=${residentCallSid} -> ${roomName(residentCallSid)}, Ava will be added`);
+    log(`RESIDENT resident=${residentCallSid} -> ${roomName(residentCallSid)}, Iris will be added`);
     sendTwiml(res, conferenceTwiml(residentCallSid, { endConferenceOnExit: true }));
   }
 
@@ -769,8 +769,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       timings: {},
       holdTimer: null, //      pending "music on" (see scheduleHold)
       holdPeriods: [], //      [{ from, to }] resident on hold music
-      mutePeriods: [], //      [{ from, to }] Ava muted
-      residentUpdates: [], //  [{ tech, at }] "technician N did not pick up" cues sent to Ava
+      mutePeriods: [], //      [{ from, to }] Iris muted
+      residentUpdates: [], //  [{ tech, at }] "technician N did not pick up" cues sent to Iris
     };
     transfers.set(callSid, t);
     timing(t, 'tool_call');
@@ -797,7 +797,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         `If you hear "${ANNOUNCEMENTS.unavailable}", the resident can hear you again: apologise and offer to take a message.`,
     });
     setImmediate(() => startSearch(t));
-    // Give Ava time to say "please hold" before the music replaces her.
+    // Give Iris time to say "please hold" before the music replaces her.
     if (holdDelayMs !== null) scheduleHold(t, holdDelayMs);
   });
 
@@ -900,8 +900,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     // Straight away: stop every other technician's phone.
     cancelTechs(t, { except: i, why: 'another technician accepted' });
 
-    // The technician joins the room where the resident and Ava already are. Nobody is
-    // moved, so Ava stays. The technician leaving does not end the call for the others.
+    // The technician joins the room where the resident and Iris already are. Nobody is
+    // moved, so Iris stays. The technician leaving does not end the call for the others.
     sendTwiml(res, conferenceTwiml(t.residentCallSid, { say: TECH_ANNOUNCEMENT, endConferenceOnExit: false }));
   });
 
@@ -942,7 +942,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
   function whoIs(residentCallSid, resident, t, body) {
     if (body.CallSid === residentCallSid) return 'resident';
-    if (String(body.ParticipantLabel || '').startsWith('ava-') || body.CallSid === resident.agent.callSid) return 'agent';
+    if (String(body.ParticipantLabel || '').startsWith('iris-') || body.CallSid === resident.agent.callSid) return 'agent';
     if (t && t.winner !== null && t.techs[t.winner].callSid === body.CallSid) return 'technician';
     return 'unknown';
   }
@@ -980,8 +980,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         t.timings.technician_joined = timing(t, 'technician_joined', `conference=${body.ConferenceSid}`);
         logTimingSummary(t);
         finish(t, 'connected', t.timings.technician_joined);
-        // Silence Ava, stop the resident's hold music, then tell the room. In this order
-        // nobody hears Ava react to the announcement and the resident does not miss it.
+        // Silence Iris, stop the resident's hold music, then tell the room. In this order
+        // nobody hears Iris react to the announcement and the resident does not miss it.
         setAgentMuted(residentCallSid, true, 'technician joined');
         endHold(t, 'technician joined');
         announce(residentCallSid, 'joined');
@@ -993,7 +993,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
       if (who === 'agent') resident.agent.state = 'left';
       if (who === 'technician') {
-        // The resident is alone with Ava again, so she needs her voice back.
+        // The resident is alone with Iris again, so she needs her voice back.
         setAgentMuted(residentCallSid, false, 'technician left');
       }
       if (who === 'resident') residentGone(residentCallSid, 'left the room');
