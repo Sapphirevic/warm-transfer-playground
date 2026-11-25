@@ -562,6 +562,12 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const query = `resident=${t.residentCallSid}&tech=${i}`;
     tech.dialledAt = Date.now();
     tech.callStatus = 'queued';
+    // Proof of one-at-a-time calling: how long after the previous technician's outcome
+    // this one was dialled. The same numbers are in the report's "Call sequence".
+    const prev = t.techs[i - 1];
+    if (prev && prev.outcomeAt) {
+      log(`SEQUENCE tech#${i} ${tech.number} dialled ${tech.dialledAt - prev.outcomeAt} ms after tech#${i - 1}'s outcome (${prev.outcome}) resident=${t.residentCallSid}`);
+    }
     saveReport(t);
     try {
       const call = await client.calls.create({
@@ -789,6 +795,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         answeredAt: null,
         pressedAt: null,
         outcomeAt: null,
+        endedAt: null, // when Twilio reported this technician's line closed
       })),
       timings: {},
       holdTimer: null, //      pending "music on" (see scheduleHold)
@@ -950,6 +957,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       if (tech.outcome === 'canceled') endTechCall(t, i, 'answered after being cancelled');
     } else if (CALL_ENDED.has(status)) {
       tech.callEnded = true;
+      if (!tech.endedAt) {
+        tech.endedAt = Date.now();
+        saveReport(t);
+      }
       if (t.winner === i && t.status === 'bridging') {
         // Pressed 1 but dropped before reaching the room.
         log(`TECH tech#${i} ${tech.number} accepted but the call ended before joining the room`);

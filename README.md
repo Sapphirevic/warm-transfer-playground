@@ -220,6 +220,18 @@ On this branch a record also holds:
 
 The report pages are only served to `localhost`, not through the ngrok URL, because they contain phone numbers, call summaries and transcripts.
 
+### Call sequence (proof of one-at-a-time calling)
+
+Each report's detail page has a **Call sequence** section, and the list page has a **Sequence** column. They show that technicians were called one at a time, not in parallel:
+
+- **Verdict**, worked out from the timestamps: the most technicians *being offered the call* at the same moment (should be 1), and whether each technician was dialled only after the previous one's outcome. A technician is "being offered the call" from when they are dialled until their outcome (accepted, declined, no answer, busy, voicemail, failed). Only in that window can they press 1.
+- **Table**: per technician, how long after the previous technician's outcome they were dialled (on real calls: a few ms), when they were dialled, their outcome and when, how long they were offered the call, and when Twilio reported their line closed.
+- **Timeline**: one bar per technician on the same time scale. Bars never overlap when calling is one at a time. A grey tail means the line was still being hung up after the outcome, for example after voicemail. A technician with an outcome can no longer accept, so this does not count as overlap. It is shown as "phone lines open at once" in the raw record.
+- **Server log**: one line per next call, e.g. `SEQUENCE tech#1 +1555… dialled 2 ms after tech#0's outcome (no-answer)`.
+- The same numbers are in the JSON (`sequence` in `/reports/CA...?format=json`). Reports saved before this existed get the same check, without the line-closed times.
+
+For evidence that does not depend on this server, each technician's `call_sid` can be looked up in the Twilio Console (Monitor > Logs > Calls). Twilio's own start and end times show the next technician's call was created only after the previous one ended.
+
 ### Call transcript
 
 The detail page of each report has a **Transcript** section: what Iris and the caller side said, in time order, with the key moments of the transfer placed in between ("Iris asked for a technician", "Technician ... joined the call"). The list page shows how many lines each transcript has.

@@ -551,19 +551,19 @@ test('hold music, one technician only: nobody to update about, so it goes straig
 
 test('hold music: not started if the search is already over, and can be switched off', async (t) => {
   // Resident hangs up before the music would have started.
-  const gone = await setup({ holdDelayMs: 60 });
+  const gone = await setup({ holdDelayMs: 300 });
   t.after(gone.close);
   await gone.residentAsksForTransfer();
   await gone.room('participant-leave', { CallSid: RESIDENT });
-  await new Promise((resolve) => setTimeout(resolve, 90));
+  await new Promise((resolve) => setTimeout(resolve, 350));
   assert.deepEqual(gone.holds, []);
 
   // A technician accepted before the music would have started.
-  const quick = await setup({ holdDelayMs: 150 });
+  const quick = await setup({ holdDelayMs: 600 });
   t.after(quick.close);
   await quick.residentAsksForTransfer();
   await quick.techAcceptsAndJoins(0);
-  await new Promise((resolve) => setTimeout(resolve, 180));
+  await new Promise((resolve) => setTimeout(resolve, 650));
   assert.deepEqual(quick.holds, []);
   assert.deepEqual(quick.roomActions, ['mute:true', 'announce:joined']);
 
@@ -1007,15 +1007,16 @@ test('update with hold music: a technician accepting before the music returns st
 });
 
 test('update with hold music: an update before the first hold replaces it, so the music cannot cut Iris off', async (t) => {
-  // The first hold is due 100 ms after the tool call; the update comes first and asks for 250 ms.
-  const s = await setup({ holdDelayMs: 100, holdResumeMs: 250 });
+  // The first hold is due 300 ms after the tool call; the update comes first and asks for 700 ms.
+  // Margins are hundreds of ms so a busy machine cannot make this test flaky.
+  const s = await setup({ holdDelayMs: 300, holdResumeMs: 700 });
   t.after(s.close);
   await s.residentAsksForTransfer();
 
   await s.tech(0).status('failed'); // e.g. an unverified number fails at once
-  await wait(150); // past the original 100 ms
+  await wait(400); // past the original 300 ms, well before the new 700 ms
   assert.deepEqual(s.roomActions, ['cue:tech-update:0'], 'the original hold did not fire while Iris is speaking');
-  await wait(200);
+  await wait(450); // past 700 ms
   assert.deepEqual(s.roomActions, ['cue:tech-update:0', 'hold:true', 'mute:true']);
 });
 
@@ -1417,4 +1418,82 @@ test('transcript: the server\'s own lines are not labelled "Resident" (cue to Ir
   assert.equal(row('My bathroom sink is broken.')[2], 'Resident', 'ordinary caller lines are unchanged');
   assert.equal(row('Sorry, technician one didn&#39;t pick up. I&#39;m trying the next one now, please hold.')[2], 'Iris');
   assert.ok(page.includes('"Cue to Iris only" lines were played to Iris alone'));
+});
+
+// ---------------------------------------------------------------- call sequence (one-at-a-time proof)
+
+test('call sequence: a real search is recorded as one at a time, with the gap before each next call and when each line closed', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'] });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+
+  await s.tech(0).status('ringing');
+  await s.tech(0).status('no-answer'); // Twilio: line closed and outcome in one go
+  await tick();
+  await s.tech(1).answered();
+  await s.tech(1).amd('machine_start'); // voicemail: outcome now, line hung up by the server
+  await tick();
+  await s.tech(1).status('completed'); // ...and Twilio reports that line closed afterwards
+  await s.techAcceptsAndJoins(2);
+
+  const seq = s.report().sequence;
+  assert.equal(seq.one_at_a_time, true);
+  assert.equal(seq.technicians_dialled, 3);
+  assert.equal(seq.max_offered_the_call_at_once, 1);
+  assert.equal(seq.each_dialled_after_previous_outcome, true);
+  assert.deepEqual(seq.steps.map((x) => x.technician), [1, 2, 3]);
+  assert.equal(seq.steps[0].dialled_ms_after_previous_outcome, null, 'the first has no previous');
+  for (const step of seq.steps.slice(1)) {
+    assert.equal(typeof step.dialled_ms_after_previous_outcome, 'number');
+    assert.ok(step.dialled_ms_after_previous_outcome >= 0, 'dialled only after the previous outcome');
+  }
+  const techs = s.report().technicians;
+  assert.ok(techs[0].line_closed_at && techs[1].line_closed_at, 'line-closed times come from Twilio status callbacks');
+  assert.equal(techs[2].line_closed_at, null, 'the winner is still on the call');
+  assert.equal(s.logs.filter((line) => line.includes(' SEQUENCE tech#')).length, 2, 'one SEQUENCE log line per next call');
+  assert.ok(s.logs.some((line) => /SEQUENCE tech#1 \+15550000002 dialled \d+ ms after tech#0's outcome \(no-answer\)/.test(line)));
+
+  const page = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(page.includes('<h2>Call sequence</h2>'));
+  assert.ok(page.includes('One at a time: yes. 3 technicians dialled, never more than 1 being offered the call at the same moment'));
+  assert.equal((page.match(/<div class="lane">/g) || []).length, 3, 'one timeline lane per technician');
+  assert.ok((await s.get('/reports')).text.includes('one at a time</span> (3)'));
+});
+
+test('call sequence: parallel-style overlap is flagged, and a line still closing is reported but is not overlap', () => {
+  const { sequenceOf, renderDetail } = require('../src/reports');
+  const at = (sec) => new Date(Date.UTC(2026, 10, 25, 12, 0, 0) + sec * 1000).toISOString();
+
+  // Two technicians ringing at the same time, as parallel dialling would do.
+  const parallel = sequenceOf([
+    { number: '+15550000001', outcome: 'canceled', dialled_at: at(0), outcome_at: at(9) },
+    { number: '+15550000002', outcome: 'accepted', dialled_at: at(0.2), outcome_at: at(8) },
+  ]);
+  assert.equal(parallel.one_at_a_time, false);
+  assert.equal(parallel.max_offered_the_call_at_once, 2);
+  assert.equal(parallel.each_dialled_after_previous_outcome, false);
+  const page = renderDetail({ resident_call_sid: RESIDENT, dial_mode: 'parallel', technicians: [
+    { number: '+15550000001', outcome: 'canceled', dialled_at: at(0), outcome_at: at(9) },
+    { number: '+15550000002', outcome: 'accepted', dialled_at: at(0.2), outcome_at: at(8) },
+  ] });
+  assert.ok(page.includes('One at a time: NO. Up to 2 technicians were being offered the call at the same moment'));
+
+  // One at a time, but technician 1's line took 400 ms to close after technician 2 was dialled.
+  const sequential = sequenceOf([
+    { number: '+15550000001', outcome: 'voicemail', dialled_at: at(0), outcome_at: at(12), line_closed_at: at(12.4) },
+    { number: '+15550000002', outcome: 'no-answer', dialled_at: at(12.003), outcome_at: at(32), line_closed_at: at(32) },
+    { number: '+15550000003', outcome: 'not-called' },
+  ]);
+  assert.equal(sequential.one_at_a_time, true);
+  assert.equal(sequential.max_offered_the_call_at_once, 1);
+  assert.equal(sequential.max_phone_lines_open_at_once, 2, 'the closing line is counted honestly');
+  assert.equal(sequential.steps[1].dialled_ms_after_previous_outcome, 3);
+  assert.equal(sequential.steps[1].previous_line_still_closing_ms, 397);
+  assert.equal(sequential.technicians_dialled, 2, 'a technician never dialled is not part of the sequence');
+
+  // Back-to-back (next dialled at the exact moment of the outcome) is not overlap.
+  assert.equal(sequenceOf([
+    { outcome: 'busy', dialled_at: at(0), outcome_at: at(5) },
+    { outcome: 'busy', dialled_at: at(5), outcome_at: at(9) },
+  ]).max_offered_the_call_at_once, 1);
 });

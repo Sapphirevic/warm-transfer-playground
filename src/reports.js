@@ -48,7 +48,7 @@ function buildReport(t) {
   const firstFrom = (list = []) => iso(list.length ? list[0].from : null);
   const lastTo = (list = []) => iso(list.length ? list.at(-1).to : null);
 
-  return {
+  const report = {
     resident_call_sid: t.residentCallSid,
     resident_number: t.residentNumber,
     direction: t.direction,
@@ -95,14 +95,81 @@ function buildReport(t) {
       answered_at: iso(tech.answeredAt),
       pressed_1_at: iso(tech.pressedAt),
       outcome_at: iso(tech.outcomeAt),
+      line_closed_at: iso(tech.endedAt),
       seconds_from_tool_call: {
         dialled: after(tech.dialledAt),
         ringing: after(tech.ringingAt),
         answered: after(tech.answeredAt),
         pressed_1: after(tech.pressedAt),
         outcome: after(tech.outcomeAt),
+        line_closed: after(tech.endedAt),
       },
     })),
+  };
+  // One-at-a-time proof for supervisors (see sequenceOf).
+  report.sequence = sequenceOf(report.technicians);
+  return report;
+}
+
+// Proof that technicians were called one at a time, worked out from the technicians'
+// own timestamps (so it also works on reports saved before this existed).
+//
+// A technician is "being offered the call" from when they were dialled until their
+// outcome (accepted, declined, no answer, ...): only in that window can they press 1.
+// One-at-a-time means at most one technician is in that window at any moment, and
+// each technician is dialled only after the previous one's outcome.
+//
+// The phone line can stay open a little longer while the server hangs it up (for
+// example after voicemail is detected). That is reported separately, as the line
+// overlap; a technician whose outcome is set can no longer accept.
+function sequenceOf(technicians, now = Date.now()) {
+  const ms = (iso) => (iso ? Date.parse(iso) : null);
+  const dialled = (technicians || [])
+    .map((tech, index) => ({ tech, index }))
+    .filter(({ tech }) => tech.dialled_at)
+    .sort((a, b) => ms(a.tech.dialled_at) - ms(b.tech.dialled_at));
+
+  const maxAtOnce = (intervals) => {
+    const events = [];
+    for (const [from, to] of intervals) events.push([from, 1], [to, -1]);
+    // At the same instant, an end counts before a start (back-to-back is not overlap).
+    events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    let open = 0, max = 0;
+    for (const [, step] of events) max = Math.max(max, (open += step));
+    return max;
+  };
+
+  const steps = dialled.map(({ tech, index }, k) => {
+    const prev = k > 0 ? dialled[k - 1].tech : null;
+    const gapMs = prev && prev.outcome_at ? ms(tech.dialled_at) - ms(prev.outcome_at) : null;
+    const lineOverlapMs = prev && prev.line_closed_at ? Math.max(0, ms(prev.line_closed_at) - ms(tech.dialled_at)) : null;
+    const end = ms(tech.outcome_at);
+    return {
+      technician: index + 1,
+      number: tech.number,
+      outcome: tech.outcome,
+      dialled_at: tech.dialled_at,
+      outcome_at: tech.outcome_at,
+      line_closed_at: tech.line_closed_at || null,
+      seconds_offered: end ? Math.round((end - ms(tech.dialled_at)) / 100) / 10 : null,
+      // How long after the previous technician's outcome this one was dialled.
+      dialled_ms_after_previous_outcome: gapMs,
+      // How long the previous technician's line was still closing after this one was dialled.
+      previous_line_still_closing_ms: lineOverlapMs,
+    };
+  });
+
+  const offered = dialled.map(({ tech }) => [ms(tech.dialled_at), ms(tech.outcome_at) || now]);
+  const lines = dialled.map(({ tech }) => [ms(tech.dialled_at), ms(tech.line_closed_at) || ms(tech.outcome_at) || now]);
+  const maxOffered = maxAtOnce(offered);
+  const dialledInOrder = steps.every((s) => s.dialled_ms_after_previous_outcome === null || s.dialled_ms_after_previous_outcome >= 0);
+  return {
+    one_at_a_time: dialled.length > 0 && maxOffered <= 1 && dialledInOrder,
+    technicians_dialled: dialled.length,
+    max_offered_the_call_at_once: maxOffered,
+    max_phone_lines_open_at_once: maxAtOnce(lines),
+    each_dialled_after_previous_outcome: dialledInOrder,
+    steps,
   };
 }
 
@@ -180,6 +247,18 @@ function page(title, body) {
   tr.tool td { color: #666; font-style: italic; }
   tr.unheard td { color: #999; background: #f7f7f7; text-decoration: line-through; }
   tr.marker td { background: #fff6d6; font-weight: 600; }
+  .verdict { padding: 10px 14px; border-radius: 6px; font-weight: 600; display: inline-block; }
+  .verdict.yes { background: #e6f4e6; color: #116611; }
+  .verdict.no { background: #fbe9e9; color: #a33; }
+  .timeline { max-width: 900px; margin: 8px 0 4px; }
+  .lane { display: flex; align-items: center; height: 28px; border-bottom: 1px dashed #e4e4e4; }
+  .lane .label { width: 190px; flex: none; font-size: 12px; color: #333; }
+  .lane .track { position: relative; flex: 1; height: 100%; border-left: 1px solid #bbb; }
+  .lane .offer { position: absolute; top: 6px; height: 16px; min-width: 2px; background: #4a7bd0; border-radius: 3px; }
+  .lane .offer.accepted { background: #2e8b57; }
+  .lane .closing { position: absolute; top: 10px; height: 8px; background: #bbb; border-radius: 2px; }
+  .axis { display: flex; justify-content: space-between; font-size: 12px; color: #666; margin-left: 190px; }
+  .legend span { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin: 0 4px 0 12px; vertical-align: middle; }
   tr.cue td { color: #666; font-style: italic; background: #f4f0ff; }
   tr.announcement td { color: #555; font-style: italic; }
   .note { color: #8a5a00; }
@@ -198,6 +277,7 @@ function renderList(reports) {
   <td>${time(r.started_at)}</td>
   <td>${dash(r.resident_number)}</td>
   <td>${dash(r.dial_mode)}</td>
+  <td>${sequenceCell(r)}</td>
   <td>${r.transfer_style ? 'stays' : 'leaves'}</td>
   <td class="${r.result === 'connected' ? 'connected' : 'other'}">${resultLabel(r)}</td>
   <td>${seconds(r.resident_wait_seconds)}</td>
@@ -209,7 +289,7 @@ function renderList(reports) {
 
   return page('Transfer reports', `<h1>Transfer reports (${reports.length})</h1>
 ${reports.length === 0 ? '<p>No transfers yet. A report appears here as soon as Iris calls request_transfer.</p>' : `<div class="wrap"><table>
-<tr><th>Started</th><th>Resident</th><th>Mode</th><th>Agent</th><th>Result</th><th>Resident waited</th><th>Technicians</th><th>Summary</th><th>Transcript</th><th>Call SID</th></tr>
+<tr><th>Started</th><th>Resident</th><th>Mode</th><th>Sequence</th><th>Agent</th><th>Result</th><th>Resident waited</th><th>Technicians</th><th>Summary</th><th>Transcript</th><th>Call SID</th></tr>
 ${rows.join('\n')}
 </table></div>`}`);
 }
@@ -337,6 +417,57 @@ ${body.join('\n')}
 </table></div>`}`;
 }
 
+// "Call sequence": the evidence that technicians were called one at a time.
+function renderSequence(r) {
+  const seq = sequenceOf(r.technicians);
+  if (seq.technicians_dialled === 0) return '<h2>Call sequence</h2>\n<p>No technician was dialled.</p>';
+  const msText = (v) => (v === null || v === undefined ? '-' : v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`);
+
+  const verdict = seq.one_at_a_time
+    ? `One at a time: yes. ${seq.technicians_dialled} technician${seq.technicians_dialled === 1 ? '' : 's'} dialled, never more than ${seq.max_offered_the_call_at_once} being offered the call at the same moment, and each one dialled only after the previous one's outcome.`
+    : `One at a time: NO. Up to ${seq.max_offered_the_call_at_once} technicians were being offered the call at the same moment${seq.each_dialled_after_previous_outcome ? '' : ', and at least one was dialled before the previous one had an outcome'}. This report was probably made with parallel dialling (dial mode: ${r.dial_mode || 'unknown'}).`;
+
+  const rows = seq.steps.map((s, k) => `<tr>
+  <td>${s.technician}</td>
+  <td>${dash(s.number)}</td>
+  <td>${k === 0 ? 'first call' : msText(s.dialled_ms_after_previous_outcome)}</td>
+  <td>${time(s.dialled_at)}</td>
+  <td>${dash(s.outcome)}<br>${time(s.outcome_at)}</td>
+  <td>${s.seconds_offered === null ? '-' : `${esc(s.seconds_offered)} s`}</td>
+  <td>${time(s.line_closed_at)}</td>
+</tr>`);
+
+  // Timeline: one lane per technician, scaled to the whole search.
+  const ms = (iso) => (iso ? Date.parse(iso) : null);
+  const t0 = Math.min(...seq.steps.map((s) => ms(s.dialled_at)));
+  const t1 = Math.max(...seq.steps.map((s) => ms(s.line_closed_at) || ms(s.outcome_at) || ms(s.dialled_at)), t0 + 1000);
+  const pct = (v) => `${(((v - t0) / (t1 - t0)) * 100).toFixed(2)}%`;
+  const lanes = seq.steps.map((s) => {
+    const from = ms(s.dialled_at);
+    const to = ms(s.outcome_at) || t1;
+    const closed = ms(s.line_closed_at);
+    const closing = closed && closed > to ? `<div class="closing" style="left:${pct(to)};width:calc(${pct(closed)} - ${pct(to)})"></div>` : '';
+    return `<div class="lane"><div class="label">Technician ${s.technician} (${esc(s.outcome || 'calling')})</div><div class="track"><div class="offer${s.outcome === 'accepted' ? ' accepted' : ''}" style="left:${pct(from)};width:calc(${pct(to)} - ${pct(from)})"></div>${closing}</div></div>`;
+  });
+
+  const overlaps = seq.steps.filter((s) => s.previous_line_still_closing_ms > 0);
+  const lineNote = overlaps.length
+    ? `<p>Phone lines: ${overlaps.map((s) => `technician ${s.technician - 1}'s line was still closing for ${msText(s.previous_line_still_closing_ms)} after technician ${s.technician} was dialled`).join('; ')}. That is the server hanging up a call that had already been given its outcome; a technician with an outcome cannot accept the call.</p>`
+    : (seq.steps.some((s) => s.line_closed_at) ? '<p>Phone lines: no technician\'s line was still open when the next technician was dialled.</p>' : '');
+
+  return `<h2>Call sequence</h2>
+<p class="verdict ${seq.one_at_a_time ? 'yes' : 'no'}">${esc(verdict)}</p>
+<p>A technician is <em>being offered the call</em> from when they are dialled until their outcome (accepted, declined, no answer, busy, voicemail, failed). Only in that window can they press 1. "Line closed" is the moment Twilio reported their phone call ended.</p>
+<div class="wrap"><table>
+<tr><th>#</th><th>Number</th><th>Dialled after previous outcome</th><th>Dialled</th><th>Outcome</th><th>Offered for</th><th>Line closed (Twilio)</th></tr>
+${rows.join('\n')}
+</table></div>
+<div class="timeline">${lanes.join('')}</div>
+<div class="axis"><span>${time(new Date(t0).toISOString())}</span><span>${((t1 - t0) / 1000).toFixed(1)} s</span></div>
+<p class="legend"><span style="background:#4a7bd0"></span>being offered the call<span style="background:#2e8b57"></span>accepted<span style="background:#bbb"></span>line closing after the outcome</p>
+${lineNote}`;
+}
+
 function renderDetail(r) {
   const techRows = (r.technicians || []).map((tech, i) => {
     const s = tech.seconds_from_tool_call || {};
@@ -377,10 +508,19 @@ function renderDetail(r) {
 ${techRows.join('\n')}
 </table></div>
 
+${renderSequence(r)}
+
 ${renderTranscript(r)}
 
 <h2>Raw record</h2>
 <pre>${esc(JSON.stringify(r, null, 2))}</pre>`);
 }
 
-module.exports = { createReportStore, buildReport, buildTranscript, renderList, renderDetail };
+// List page: one word per transfer for the one-at-a-time check.
+function sequenceCell(r) {
+  const seq = sequenceOf(r.technicians);
+  if (seq.technicians_dialled === 0) return '-';
+  return seq.one_at_a_time ? `<span class="connected">one at a time</span> (${seq.technicians_dialled})` : '<span class="other">overlapping</span>';
+}
+
+module.exports = { createReportStore, buildReport, buildTranscript, sequenceOf, renderList, renderDetail };

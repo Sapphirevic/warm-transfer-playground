@@ -14,6 +14,32 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-25 - call sequence proof in reports (v0.2.6)
+
+**D15. Reports prove technicians are called one at a time.**
+Asked for, so supervisors can see the calling is sequential, not parallel.
+
+What was added:
+- Each technician now records `line_closed_at`, when Twilio's status callback says their call ended.
+- Each report has a `sequence` block, computed from the technicians' timestamps:
+  - `one_at_a_time`
+  - `max_offered_the_call_at_once`
+  - `each_dialled_after_previous_outcome`
+  - per technician, `dialled_ms_after_previous_outcome` and `previous_line_still_closing_ms`
+  - `max_phone_lines_open_at_once`
+- The detail page has a "Call sequence" section with a verdict, a table and a timeline. The list page has a "Sequence" column. The server logs a `SEQUENCE` line for each next call.
+
+Definition chosen: a technician is "offered the call" from when they are dialled to their outcome, because only then can they press 1. A line still being hung up after its outcome, as after voicemail, is reported separately and honestly as `max_phone_lines_open_at_once`. It does not count as overlap.
+
+Checked three ways:
+1. Simulated tests, including a parallel pattern that must be flagged "NO".
+2. Today's two real calls, recomputed from their saved reports: both one at a time, with the next technician dialled 2 ms after the previous outcome.
+3. Twilio's own call records, which don't depend on this server:
+   - In `CA0c45…`, technician 1's call ended at 11:15:23 and technician 2's call was created at 11:15:23.
+   - In `CA67c5…`, they were 10:56:59 and 10:57:00.
+
+**Also in this version: flaky tests fixed.** On one run before v0.2.5 was pushed, 1 of 54 tests failed. The commit command only checked that test output appeared, not `fail 0`, so the push went ahead. 21 later runs were clean, so the failing test could not be identified. The three tests with margins of 20-65 ms (the hold-music-not-started tests and "update replaces first hold") were widened to hundreds of ms. Ten runs after that were clean. Commits are now gated on `fail 0`, and nothing is pushed without an explicit request.
+
 ### 2026-11-25 - report labels for the server's own lines (v0.2.5)
 
 **D14. Transcript rows for cues and announcements are not labelled "Resident".**
@@ -197,4 +223,6 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | D3 on a real call | (1) server report timestamps, (2) Twilio room recording loudness at 250 ms and 50 ms, with a positive control, (3) ElevenLabs transcript timing | All three agree: the cue is silent in the room, and Iris's update is heard once |
 | 2026-11-25 | D13 | `npm test` | 53/53 pass |
 | 2026-11-25 | D14 | (1) `npm test` (test built from the real call's lines), (2) label fix removed on purpose and restored, (3) real report CA0c45…4d71 rendered with the new code | 54/54 pass, 5 runs in a row. 1 test fails without the fix. The real report shows the cue as "Cue to Iris only", the announcement as "Room announcement (Twilio), plus the caller", and Iris's update as "Iris" at 11:15:30, matching the room recording |
+| 2026-11-25 | D15 | (1) `npm test` incl. a parallel pattern that must fail, (2) sequence recomputed on the 2 real call reports, (3) Twilio call records (created/end times) for every technician call | 56/56 pass. Both real calls one at a time, next technician dialled 2 ms after the previous outcome. Twilio: next call created 0 s and 1 s after the previous call ended |
+| 2026-11-25 | Flaky-test fix | 10 consecutive full runs after widening the 3 tight timing tests | 10/10 clean |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |
