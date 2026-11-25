@@ -77,7 +77,20 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
   - The URL is theirs to change.
 
   Recommendation: use our own free ngrok account. Waiting for a decision.
-- [ ] **Prompt order: tool first, then "please hold".** On the first real call (2026-11-25), Ava said "I'm connecting you to a technician now. Please hold." but no report was created, so her `request_transfer` call never reached the server. The most likely cause is that the tool URL still pointed at the old ngrok address. She then went silent (skip_turn), with no music and no search: an awkward silence for the resident.
+- [ ] **ElevenLabs agent misconfigured (found 2026-11-25, call `CAd3a6…1339`).** The server log had no tool request. The ElevenLabs conversation record showed Ava called `transfer_to_technician` twice (HTTP 404 both times), then skip_turn. The agent's settings ("Ava Transfer Lab"), read through the API, showed:
+  - `transfer_to_technician` points at a dead trycloudflare.com tunnel, with no path.
+  - The correct tool (our server's `/tool/request-transfer`, right secret, `call_sid` as a dynamic variable) is named `check_transfer_status`. The prompt asks for `request_transfer`, so it was never used.
+  - The system prompt is an older "You are Iris…" version, not the D9 prompt. The first message says "Ava", so the agent called itself both names.
+  - The `transfer_to_number` system tool is enabled.
+
+  Fix:
+  1. Delete `transfer_to_technician`.
+  2. Rename `check_transfer_status` to `request_transfer`.
+  3. Paste the D9 prompt.
+  4. Turn off `transfer_to_number`.
+
+  The agent may be shared with a colleague, so check with them first, or use our own copy of the agent.
+- [ ] **Prompt order: tool first, then "please hold".** On the first real call (2026-11-25), Ava said "I'm connecting you to a technician now. Please hold." before the tool call, and the tool call failed (see the item above). She then went silent (skip_turn), with no music and no search: an awkward silence for the resident.
   - Proposed: the prompt has her call the tool first and say "please hold" only when it returns `searching`. On an error, she apologises and offers to take a message.
   - Prompt change only, no code change. Waiting for a decision.
 - [x] Local `.env`: change `DIAL_MODE=parallel` to `DIAL_MODE=sequential` (D8). Done 2026-11-25. Server restarted, and it now lists 2 technicians.
