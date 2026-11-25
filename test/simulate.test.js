@@ -1375,3 +1375,46 @@ test('security: bad Twilio signature is 403, tool endpoint needs X-Tool-Secret a
   assert.equal((await s.json('/tool/request-transfer', { parent_call_sid: RESIDENT, summary: 'x' })).status, 404);
   assert.equal((await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'x' })).status, 404, 'unknown call');
 });
+
+test('transcript: the server\'s own lines are not labelled "Resident" (cue to Iris only, Twilio room announcement)', () => {
+  const { renderDetail } = require('../src/reports');
+  const at = (s) => new Date(Date.UTC(2026, 10, 25, 11, 15, s)).toISOString();
+  // The lines below are copied from a real call's transcript (2026-11-25, call CA0c45…4d71).
+  const report = {
+    resident_call_sid: RESIDENT,
+    resident_number: RESIDENT_NUMBER,
+    started_at: at(0),
+    finished_at: at(45),
+    result: 'connected',
+    connected_technician: '+15550000002',
+    transfer_style: 'agent stays on the call',
+    technicians: [{ number: '+15550000001', outcome: 'no-answer' }, { number: '+15550000002', outcome: 'accepted' }],
+    transcript: {
+      status: 'final',
+      conversations: [{
+        conversation_id: 'c1',
+        status: 'done',
+        started_at: new Date(Date.parse(at(0)) - 20_000).toISOString(),
+        entries: [
+          { role: 'tool', text: 'called request_transfer', seconds: 20 },
+          { role: 'user', text: 'Technician one did not pick up. Calling technician two now.', seconds: 44 },
+          { role: 'agent', text: "Sorry, technician one didn't pick up. I'm trying the next one now, please hold.", seconds: 49 },
+          { role: 'user', text: 'Hello? A technician has joined the call.', seconds: 66 },
+          { role: 'user', text: 'No technician is available right now.', seconds: 70 },
+          { role: 'user', text: 'My bathroom sink is broken.', seconds: 10 },
+        ],
+      }],
+    },
+  };
+  const page = renderDetail(report);
+  const row = (text) => page.match(new RegExp(`<tr class="([^"]+)"><td>[^<]*</td><td>([^<]+)</td><td class="text">${text.replace(/[.?']/g, (c) => (c === "'" ? '&#39;' : `\\${c}`))}`));
+
+  const cue = row('Technician one did not pick up. Calling technician two now.');
+  assert.deepEqual([cue[1], cue[2]], ['cue', 'Cue to Iris only (resident did not hear it)']);
+  const merged = row('Hello? A technician has joined the call.');
+  assert.deepEqual([merged[1], merged[2]], ['announcement', 'Room announcement (Twilio), plus the caller'], '"Hello?" was the caller, the rest was Twilio');
+  assert.equal(row('No technician is available right now.')[2], 'Cue to Iris only (resident did not hear it)');
+  assert.equal(row('My bathroom sink is broken.')[2], 'Resident', 'ordinary caller lines are unchanged');
+  assert.equal(row('Sorry, technician one didn&#39;t pick up. I&#39;m trying the next one now, please hold.')[2], 'Iris');
+  assert.ok(page.includes('"Cue to Iris only" lines were played to Iris alone'));
+});

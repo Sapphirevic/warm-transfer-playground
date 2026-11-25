@@ -14,6 +14,20 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-25 - report labels for the server's own lines (v0.2.5)
+
+**D14. Transcript rows for cues and announcements are not labelled "Resident".**
+On call `CA0c45…4d71`, the report page showed "Resident: Technician one did not pick up. Calling technician two now." right before Iris said the same thing, which read as the message being given twice.
+
+The cause was the report's labelling, not the call. ElevenLabs lists everything Iris hears that isn't her own voice as "user", and the report turned every "user" line into "Resident". The room recording shows the resident never heard that line (D3, confirmed above).
+
+Now:
+- Lines matching a cue (technician update or "No technician is available right now") are labelled **"Cue to Iris only (resident did not hear it)"**.
+- "A technician has joined the call." is labelled **"Room announcement (Twilio)"**.
+- The match is loose because speech recognition writes "one" for "1". If the caller's own words were merged into the same line, as with "Hello? A technician has joined the call.", the label adds **"plus the caller"**.
+
+Code: `serverLine` in `src/reports.js`. The test uses the real call's lines.
+
 ### 2026-11-25 - cue confirmed private, resume time raised (v0.2.4)
 
 **D3 confirmed on a real call** (call `CA0c45…4d71`, conversation `conv_4601…5sk5`). Technician 1 rang out, Iris gave the update, and technician 2 pressed 1 and joined.
@@ -182,4 +196,5 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | D12 Iris-only (v0.2.3) | `npm test`, then broke it on purpose 2 ways and restored | 53/53 pass, 5 runs in a row. Twilio fallback put back: 1 fails. Held cue never sent: 1 fails. Code restored and matched the backup exactly |
 | 2026-11-25 | D3 on a real call | (1) server report timestamps, (2) Twilio room recording loudness at 250 ms and 50 ms, with a positive control, (3) ElevenLabs transcript timing | All three agree: the cue is silent in the room, and Iris's update is heard once |
 | 2026-11-25 | D13 | `npm test` | 53/53 pass |
+| 2026-11-25 | D14 | (1) `npm test` (test built from the real call's lines), (2) label fix removed on purpose and restored, (3) real report CA0c45…4d71 rendered with the new code | 54/54 pass, 5 runs in a row. 1 test fails without the fix. The real report shows the cue as "Cue to Iris only", the announcement as "Room announcement (Twilio), plus the caller", and Iris's update as "Iris" at 11:15:30, matching the room recording |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |

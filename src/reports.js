@@ -180,6 +180,8 @@ function page(title, body) {
   tr.tool td { color: #666; font-style: italic; }
   tr.unheard td { color: #999; background: #f7f7f7; text-decoration: line-through; }
   tr.marker td { background: #fff6d6; font-weight: 600; }
+  tr.cue td { color: #666; font-style: italic; background: #f4f0ff; }
+  tr.announcement td { color: #555; font-style: italic; }
   .note { color: #8a5a00; }
   .connected { color: #116611; font-weight: 600; }
   .other { color: #a33; font-weight: 600; }
@@ -280,18 +282,46 @@ function renderTranscript(r) {
   // Anything the model "said" while its leg was muted was never heard on the call.
   const whileMuted = (row) => Boolean(row.at && mutePeriods.some((p) => row.at >= p.from && (!p.to || row.at < p.to)));
 
+  // ElevenLabs labels everything Iris hears that is not her own voice as "user". Two
+  // kinds of those lines are the server's, not the caller's:
+  //  - cues played to Iris's leg only ("Technician 1 did not pick up...", "No technician
+  //    is available right now."): nobody else on the call heard them (decision.md D3, D12)
+  //  - the room announcement "A technician has joined the call." in Twilio's voice
+  // Speech recognition may write numbers as words and may merge the caller's own words
+  // into the same line, so the match is loose and any extra words are flagged.
+  const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?/i;
+  const ROOM_ANNOUNCEMENT = /a technician has joined the call\.?/i;
+  const extraWords = (text, re) => /[a-z]/i.test(text.replace(re, ''));
+  const serverLine = (row) => {
+    if (row.role !== 'user') return null;
+    if (CUE_TO_IRIS.test(row.text)) {
+      return { cls: 'cue', label: extraWords(row.text, CUE_TO_IRIS) ? 'Cue to Iris only, plus the caller' : 'Cue to Iris only (resident did not hear it)' };
+    }
+    if (ROOM_ANNOUNCEMENT.test(row.text)) {
+      return { cls: 'announcement', label: extraWords(row.text, ROOM_ANNOUNCEMENT) ? 'Room announcement (Twilio), plus the caller' : 'Room announcement (Twilio)' };
+    }
+    return null;
+  };
+
   // ElevenLabs hears one audio stream, so once the technician is in the room it
   // cannot tell the resident and the technician apart.
   const speaker = (row) => {
     if (row.role === 'agent') return whileMuted(row) ? 'Iris (muted, not heard)' : 'Iris';
     if (row.role === 'tool') return 'Iris (tool)';
+    const server = serverLine(row);
+    if (server) return server.label;
     if (joinedAt && row.at && row.at >= joinedAt && r.transfer_style) return 'Resident or technician';
     return 'Resident';
+  };
+  const rowClass = (row) => {
+    const server = serverLine(row);
+    if (server) return server.cls;
+    return `${row.role}${row.role === 'agent' && whileMuted(row) ? ' unheard' : ''}`;
   };
 
   const body = rows.map((row) => (row.role === 'marker'
     ? `<tr class="marker"><td>${row.at ? esc(row.at.slice(11, 19)) : '-'}</td><td colspan="2">${esc(row.text)}</td></tr>`
-    : `<tr class="${esc(row.role)}${row.role === 'agent' && whileMuted(row) ? ' unheard' : ''}"><td>${row.at ? esc(row.at.slice(11, 19)) : '-'}</td><td>${esc(speaker(row))}</td><td class="text">${esc(row.text)}${row.interrupted ? ' <em>(interrupted)</em>' : ''}</td></tr>`));
+    : `<tr class="${esc(rowClass(row))}"><td>${row.at ? esc(row.at.slice(11, 19)) : '-'}</td><td>${esc(speaker(row))}</td><td class="text">${esc(row.text)}${row.interrupted ? ' <em>(interrupted)</em>' : ''}</td></tr>`));
 
   const summaries = transcript.conversations.filter((c) => c.summary).map((c) => `<p><strong>ElevenLabs summary:</strong> ${esc(c.summary)}</p>`);
   const lines = transcriptLineCount(r);
@@ -300,7 +330,7 @@ function renderTranscript(r) {
 ${notes.map((note) => `<p class="note">${note}</p>`).join('\n')}
 ${summaries.join('\n')}
 ${lines === 0 && notes.length === 0 ? '<p>ElevenLabs returned no spoken lines for this call.</p>' : ''}
-${lines === 0 ? '' : `<p>Times are UTC. ${r.transfer_style ? 'After the technician joins, ElevenLabs hears the resident and the technician as one voice, so those lines are labelled "Resident or technician". Iris is muted while the resident is on hold and while the technician is on the call: lines marked "muted, not heard" are things the model produced that nobody on the call heard.' : 'Iris leaves when the technician joins, so the conversation between the resident and the technician is not included.'}</p>
+${lines === 0 ? '' : `<p>Times are UTC. ${r.transfer_style ? 'After the technician joins, ElevenLabs hears the resident and the technician as one voice, so those lines are labelled "Resident or technician". Iris is muted while the resident is on hold and while the technician is on the call: lines marked "muted, not heard" are things the model produced that nobody on the call heard. ElevenLabs lists everything Iris hears as the caller, so the server\'s own lines are relabelled: "Cue to Iris only" lines were played to Iris alone (the resident did not hear them; Iris then says it in her own words), and "Room announcement (Twilio)" lines were spoken by Twilio to everyone.' : 'Iris leaves when the technician joins, so the conversation between the resident and the technician is not included.'}</p>
 <div class="wrap"><table class="transcript">
 <tr><th>Time</th><th>Speaker</th><th>Said</th></tr>
 ${body.join('\n')}
