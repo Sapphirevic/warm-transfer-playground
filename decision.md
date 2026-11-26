@@ -16,6 +16,24 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - Iris is told to wrap up when the technician presses 1 (v0.11.0)
+
+**D31. At press 1, Iris gets a cue (her leg only): "A technician has accepted and is joining the call now. Finish your point in a few words, tell the caller the technician is joining, and do not ask a new question." The room hears "A technician has joined the call" only after she has said that and finished.**
+
+Requested: "after Iris is done talking, then you announce the tech has joined, so Iris should know when to wrap up". Before this, Iris only learnt that a technician was coming if she happened to call `update_transfer` (D27).
+
+What changed:
+- **The cue at press 1.** It waits for a pause like every cue, so it doesn't talk over anyone. It plays while the technician hears their final update and "connecting you", so it adds little or no time.
+- **The handover waits for the wrap-up.** The technician is on hold (silent, D30) until the cue has been played and Iris has replied and gone quiet for 1.5 s. Then: Iris muted, technician brought in, "A technician has joined the call".
+- **If Iris doesn't reply** within `HANDOVER_WRAPUP_WAIT_MS` (6 s) of the cue, the handover goes ahead. The 30 s safety net still applies.
+- **No double message.** If Iris calls `update_transfer` before the cue has played, the reply already carries the wrap-up message, and the cue is dropped.
+- **Pressed 1, then dropped before the room:** the wrap-up is cleared and Iris is told "No technician is available right now".
+
+Checks:
+- 95/95 tests, 3 runs. 5 new tests: the full order (cue, technician on hold, Iris's wrap-up sentence, then mute, release and "joined"), no reply from Iris, update_transfer replacing the cue, not sent while Iris is muted, and the 6 s default. Existing tests now expect the `cue:wrapup` step.
+- Broken on purpose (no wrap-up cue): 18 tests fail; code restored from the backup. The other two planned breaks were stopped on request (fewer test runs).
+- Not yet heard on a real call.
+
 ### 2026-11-26 - the technician waits on hold until Iris has finished (v0.10.0)
 
 **D30. Iris is never cut off at the handover: the technician joins muted, waits on hold, and comes in only once Iris has been quiet for 1.5 s.**
@@ -541,3 +559,4 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-26 | D28 merge of full-call-recording | (1) `npm test` 3 runs, (2) config flags parsed with a dummy env, (3) 2 deliberate breaks of the recording code, then restored | 84/84 pass each run. Flags default on, turn off, bad value refused. Each break fails 1 test; code restored byte-identical |
 | 2026-11-26 | D29 technician-left cue | (1) `npm test` 3 runs, (2) real report CAd7d4…7cde5 re-rendered, (3) 3 deliberate breaks, then restored | 88/88 pass each run. "Hello? Hello?" relabelled "Resident" in both tabs. Each break fails 1-3 tests; code restored byte-identical |
 | 2026-11-26 | D30 technician on hold until Iris finishes | (1) `npm test` 3 runs, (2) 3 deliberate breaks, then restored, (3) Twilio library participant update params and Conference TwiML checked | 90/90 pass each run. Breaks fail 6, 2 and 1 tests; code restored byte-identical. Library sends Muted/Hold/HoldUrl/HoldMethod together; muted="true" renders |
+| 2026-11-26 | D31 wrap-up cue at press 1 | (1) `npm test` 3 runs, (2) 1 deliberate break, then restored from backup (2 more stopped on request), (3) - | 95/95 pass each run. Break (no cue): 18 tests fail |

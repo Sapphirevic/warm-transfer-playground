@@ -33,7 +33,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 // holdResumeMs: how long after a "technician did not pick up" update the music comes back.
 // recordLegs / liveTranscription / liveTranscriptionIrisLeg: the Twilio recordings and live
 // transcripts merged from full-call-recording. Off unless a test turns them on.
-async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0, handoverGraceMs = 0, recordLegs = false, liveTranscription = false, liveTranscriptionIrisLeg = false } = {}) {
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0, handoverGraceMs = 0, handoverWrapUpWaitMs = 0, recordLegs = false, liveTranscription = false, liveTranscriptionIrisLeg = false } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const legRecordings = []; //  calls(sid).recordings.create(...) -> recording the resident's own line
@@ -144,6 +144,7 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
     handoverMaxWaitMs,
     updateFallbackMs,
     handoverGraceMs,
+    handoverWrapUpWaitMs,
     holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
     recordLegs,
     liveTranscription,
@@ -415,7 +416,7 @@ test('accept: the technician joins the same room, nobody is moved, and Iris is s
   assert.equal(s.registered.length, 1, 'no second ElevenLabs conversation');
 
   // Iris is silenced first, then the room is told the technician has arrived.
-  assert.deepEqual(s.roomActions, ['mute:true', 'tech:release', 'announce:joined']);
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'mute:true', 'tech:release', 'announce:joined']);
   assert.deepEqual(s.mutes, [{ conferenceSid: CONFERENCE, callSid: s.agentLegs[0].callSid, muted: true }], "it is Iris's leg that is muted");
   assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, true);
   assert.equal(s.roomUpdates[0].sid, CONFERENCE);
@@ -480,7 +481,7 @@ test('after connecting: the call survives the technician or Iris leaving, and en
   await tick();
   assert.equal(s.roomEnded(), false);
   assert.equal(s.state.residentCalls.get(RESIDENT).present.size, 2);
-  assert.deepEqual(s.roomActions, ['mute:true', 'tech:release', 'announce:joined', 'mute:false', 'cue:left']);
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'mute:true', 'tech:release', 'announce:joined', 'mute:false', 'cue:left']);
   assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, false);
   assert.ok(s.report().agent_unmuted_at);
 
@@ -497,7 +498,7 @@ test('muting: if Twilio refuses the mute it is logged and the room is still told
   s.flags.failMute = true;
   await s.techAcceptsAndJoins(0);
 
-  assert.deepEqual(s.roomActions, ['mute:true', 'tech:release', 'announce:joined']);
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'mute:true', 'tech:release', 'announce:joined']);
   assert.ok(s.logs.some((line) => line.includes('ERROR could not mute Iris') && line.includes('Twilio error 20404')));
   assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, false);
   assert.equal(s.report().agent_muted_at, null, 'the report does not claim she was muted');
@@ -591,7 +592,7 @@ test('hold music: not started if the search is already over, and can be switched
   await quick.techAcceptsAndJoins(0);
   await new Promise((resolve) => setTimeout(resolve, 650));
   assert.deepEqual(quick.holds, []);
-  assert.deepEqual(quick.roomActions, ['mute:true', 'tech:release', 'announce:joined']);
+  assert.deepEqual(quick.roomActions, ['cue:wrapup', 'mute:true', 'tech:release', 'announce:joined']);
 
   // HOLD_MUSIC_DELAY_SEC=off
   const off = await setup({ holdDelayMs: null });
@@ -729,7 +730,7 @@ test('accepted but dropped before reaching the room: counts as no technician and
   assert.equal(s.transfer().status, 'failed');
   assert.equal(s.report().result, 'no technician');
   assert.deepEqual(s.announcements(), [], 'nothing is announced to the room');
-  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['unavailable'], 'Iris alone is told');
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['wrapup', 'unavailable'], 'Iris alone is told: joining at press 1, then that nobody is available');
 });
 
 // ---------------------------------------------------------------- nobody available
@@ -934,7 +935,7 @@ test('update: technician 1 does not pick up -> Iris alone hears the cue, the nex
   // Technician 2 takes it: the normal join, no further update.
   await s.techAcceptsAndJoins(1);
   assert.equal(s.report().result, 'connected');
-  assert.equal(s.agentCues.length, 1);
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['tech-update', 'wrapup'], 'no further update, just the wrap-up');
 });
 
 test('update: every way of not taking the call gets it (busy, voicemail, declined, no key, could not dial); the last one does not', async (t) => {
@@ -1029,7 +1030,7 @@ test('update with hold music: a technician accepting before the music returns st
   await s.techAcceptsAndJoins(1); // well within the 200 ms
   await wait(250);
 
-  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'mute:true', 'tech:release', 'announce:joined']);
+  assert.deepEqual(s.roomActions, ['hold:true', 'mute:true', 'cue:tech-update:0', 'mute:false', 'hold:false', 'cue:wrapup', 'mute:true', 'tech:release', 'announce:joined']);
 });
 
 test('update with hold music: an update before the first hold replaces it, so the music cannot cut Iris off', async (t) => {
@@ -1626,7 +1627,7 @@ test('troubleshooting branch: no hold music, Iris is told to troubleshoot safely
   assert.deepEqual(s.roomActions, ['cue:tech-update:0'], 'the update is only a cue to Iris; nothing to undo');
 
   await s.techAcceptsAndJoins(1);
-  assert.deepEqual(s.roomActions, ['cue:tech-update:0', 'mute:true', 'tech:release', 'announce:joined'], 'Iris is muted the moment the technician is in the room');
+  assert.deepEqual(s.roomActions, ['cue:tech-update:0', 'cue:wrapup', 'mute:true', 'tech:release', 'announce:joined'], 'Iris is muted the moment the technician is in the room');
   assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, true);
   assert.deepEqual(s.report().hold_periods, []);
 });
@@ -1703,9 +1704,9 @@ test('cue pause: an update still waiting when a technician joins is dropped, nev
   await s.techAcceptsAndJoins(1); // technician 2 accepts while the resident is still talking
   await s.room('participant-speech-stop', { CallSid: RESIDENT });
   await pause(100);
-  assert.deepEqual(s.agentCues, [], '"technician 1 did not pick up" would be out of date');
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['wrapup'], '"technician 1 did not pick up" would be out of date; only the wrap-up');
   assert.ok(s.logs.some((line) => line.includes('CUE dropped 1 waiting cue(s) (technician joined)')));
-  assert.deepEqual(s.roomActions, ['mute:true', 'tech:release', 'announce:joined'], 'Iris is muted and the room told, as before');
+  assert.deepEqual(s.roomActions, ['tech:hold', 'cue:wrapup', 'mute:true', 'tech:release', 'announce:joined'], 'the resident was talking: the wrap-up waited for the pause, the technician on hold meanwhile');
 });
 
 test('cue pause: "no technician" waits for a pause too, replaces a waiting update, and talking events stay out of the log', async (t) => {
@@ -1819,8 +1820,8 @@ test('handover: a technician joining while Iris is talking waits for her to fini
 
   await s.room('participant-speech-stop', { CallSid: iris });
   await tick();
-  assert.deepEqual(s.roomActions, ['tech:hold', 'mute:true', 'tech:release', 'announce:joined'], 'muted only after she finished, then the technician, then the announcement');
-  assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris finished her sentence: muting Iris')));
+  assert.deepEqual(s.roomActions, ['tech:hold', 'cue:wrapup', 'mute:true', 'tech:release', 'announce:joined'], 'muted only after she finished and wrapped up, then the technician, then the announcement');
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris wrapped up: muting Iris')));
 });
 
 test('handover: if Iris keeps talking, she is muted after the maximum wait; if she is quiet, at once', async (t) => {
@@ -1839,7 +1840,7 @@ test('handover: if Iris keeps talking, she is muted after the maximum wait; if s
   t.after(quiet.close);
   await quiet.residentAsksForTransfer();
   await quiet.techAcceptsAndJoins(0);
-  assert.deepEqual(quiet.roomActions, ['mute:true', 'tech:release', 'announce:joined'], 'Iris not talking: immediate, as before');
+  assert.deepEqual(quiet.roomActions, ['cue:wrapup', 'mute:true', 'tech:release', 'announce:joined'], 'Iris not talking: immediate, as before');
 });
 
 // ---------------------------------------------------------------- updates via the update_transfer reply (D26)
@@ -1884,16 +1885,16 @@ test('update via tool reply: two technicians failing before her next call are to
 });
 
 test('update fallback: with no update_transfer call in time, the audio cue is used', async (t) => {
-  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], updateFallbackMs: 80 });
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], updateFallbackMs: 250 });
   t.after(s.close);
   await s.residentAsksForTransfer();
   await s.tech(0).status('no-answer');
   await tick();
   assert.deepEqual(s.agentCues, []);
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  await new Promise((resolve) => setTimeout(resolve, 400));
   assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['tech-update']);
   assert.equal(s.report().resident_updates[0].delivered_via, 'audio cue');
-  assert.ok(s.logs.some((line) => line.includes('UPDATE no update_transfer call within 80 ms: using the audio cue')));
+  assert.ok(s.logs.some((line) => line.includes('UPDATE no update_transfer call within 250 ms: using the audio cue')));
 });
 
 test('update fallback: a technician accepting before the fallback means no cue at all', async (t) => {
@@ -1903,7 +1904,7 @@ test('update fallback: a technician accepting before the fallback means no cue a
   await s.tech(0).status('no-answer');
   await s.techAcceptsAndJoins(1);
   await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.deepEqual(s.agentCues, []);
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['wrapup'], 'no update cue, only the wrap-up');
 });
 
 test('accept: progress reported after the brief is read to the technician when they press 1', async (t) => {
@@ -1945,16 +1946,16 @@ test('handover grace: Iris quiet at the join but starting a sentence is not cut 
   await s.residentAsksForTransfer();
   const iris = s.agentLegs[0].callSid;
   await s.techAcceptsAndJoins(0); // Iris quiet at this moment
-  assert.deepEqual(s.roomActions, ['tech:hold'], 'not muted at once: grace period, technician on hold');
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold'], 'not muted at once: grace period, technician on hold');
   await s.room('participant-speech-start', { CallSid: iris }); // her next sentence starts within the grace
   await new Promise((resolve) => setTimeout(resolve, 350));
-  assert.deepEqual(s.roomActions, ['tech:hold'], 'still talking after the grace: keep waiting');
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold'], 'still talking after the grace: keep waiting');
   assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris is talking: the technician waits on hold until she finishes')));
   await s.room('participant-speech-stop', { CallSid: iris });
   await tick();
-  assert.deepEqual(s.roomActions, ['tech:hold'], 'a pause is not the end: she gets the grace period to carry on');
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold'], 'a pause is not the end: she gets the grace period to carry on');
   await new Promise((resolve) => setTimeout(resolve, 350));
-  assert.deepEqual(s.roomActions, ['tech:hold', 'mute:true', 'tech:release', 'announce:joined'], 'muted only after she finished');
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold', 'mute:true', 'tech:release', 'announce:joined'], 'muted only after she finished');
 });
 
 test('handover grace: if Iris stays quiet, the handover happens when the grace ends', async (t) => {
@@ -1962,9 +1963,9 @@ test('handover grace: if Iris stays quiet, the handover happens when the grace e
   t.after(s.close);
   await s.residentAsksForTransfer();
   await s.techAcceptsAndJoins(0);
-  assert.deepEqual(s.roomActions, ['tech:hold']);
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold']);
   await new Promise((resolve) => setTimeout(resolve, 250));
-  assert.deepEqual(s.roomActions, ['tech:hold', 'mute:true', 'tech:release', 'announce:joined']);
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold', 'mute:true', 'tech:release', 'announce:joined']);
   assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris is quiet: muting Iris')));
 });
 
@@ -2129,7 +2130,7 @@ test('technician leaves while Iris is still finishing her sentence: no mute, no 
 // ---------------------------------------------------------------- technician on hold while Iris finishes (D30)
 
 test('technician hold: joins muted, waits on hold through every pause in Iris\'s turn, then is brought in after she is muted', async (t) => {
-  const s = await setup({ handoverGraceMs: 200, handoverMaxWaitMs: 5000 });
+  const s = await setup({ handoverGraceMs: 200, handoverMaxWaitMs: 5000, cueQuietGapMs: 150 });
   t.after(s.close);
   await s.residentAsksForTransfer();
   const iris = s.agentLegs[0].callSid;
@@ -2157,10 +2158,11 @@ test('technician hold: joins muted, waits on hold through every pause in Iris\'s
   assert.deepEqual(s.roomActions, ['tech:hold'], 'a pause inside her turn does not cut her off');
   assert.deepEqual(s.mutes, []);
 
-  // She finishes and stays quiet for the grace period: muted, then the technician comes in.
+  // She finishes: the wrap-up cue goes out after a pause, then once she has been quiet for
+  // the grace period she is muted and the technician comes in.
   await s.room('participant-speech-stop', { CallSid: iris });
-  await new Promise((resolve) => setTimeout(resolve, 260));
-  assert.deepEqual(s.roomActions, ['tech:hold', 'mute:true', 'tech:release', 'announce:joined']);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.deepEqual(s.roomActions, ['tech:hold', 'cue:wrapup', 'mute:true', 'tech:release', 'announce:joined']);
   assert.deepEqual(s.techUpdates[1], { conferenceSid: CONFERENCE, callSid: techSid, hold: false, muted: false });
 
   const report = s.report();
@@ -2221,4 +2223,82 @@ test('transcript: the "technician has left" cue is labelled as a cue to Iris onl
   const merged = panelOf(page, 'merged');
   assert.match(merged, /<td>Resident<\/td><td class="text">Hello\? Hello\?/, 'merged view agrees');
   assert.doesNotMatch(merged, /The technician has left the call\. Please speak/, 'the cue is not a line someone said');
+});
+
+// ---------------------------------------------------------------- wrap-up (D31)
+
+test('wrap-up: at press 1 Iris is told to wrap up; the room hears "joined" only after her wrap-up sentence', async (t) => {
+  const s = await setup({ handoverGraceMs: 150, handoverMaxWaitMs: 5000, handoverWrapUpWaitMs: 2000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+
+  await s.tech(0).answered();
+  await s.tech(0).press('1');
+  await tick();
+  // The cue goes to Iris's leg only, at once (nobody is talking).
+  assert.deepEqual(s.roomActions, ['cue:wrapup']);
+  assert.equal(s.agentCues.at(-1).callSid, iris);
+  const played = await s.hook('/conference/announce?kind=wrapup', { CallSid: iris });
+  assert.match(played.text, /<Say>A technician has accepted and is joining the call now\. Finish your point in a few words, tell the caller the technician is joining, and do not ask a new question\.<\/Say>/);
+
+  // The technician arrives before Iris has replied: they wait on hold.
+  await s.tech(0).joins();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold'], 'Iris has not wrapped up yet, longer than the grace period');
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER waiting for Iris to wrap up')));
+
+  // Iris: "Good news, the technician is joining now." Not cut off while she says it.
+  await s.room('participant-speech-start', { CallSid: iris });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold']);
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold', 'mute:true', 'tech:release', 'announce:joined']);
+  assert.ok(s.logs.some((line) => line.includes('WRAPUP done (Iris finished)')));
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris wrapped up: muting Iris')));
+});
+
+test('wrap-up: if Iris does not reply to the cue, the handover goes ahead after HANDOVER_WRAPUP_WAIT_MS', async (t) => {
+  const s = await setup({ handoverGraceMs: 50, handoverMaxWaitMs: 5000, handoverWrapUpWaitMs: 200 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.techAcceptsAndJoins(0);
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold']);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.deepEqual(s.roomActions, ['cue:wrapup', 'tech:hold', 'mute:true', 'tech:release', 'announce:joined']);
+  assert.ok(s.logs.some((line) => line.includes('WRAPUP done (Iris did not start within 0.2s)')));
+});
+
+test('wrap-up: an update_transfer call before the cue is played carries the wrap-up instead, so no cue', async (t) => {
+  const s = await setup({ cueQuietGapMs: 5000, cueMaxWaitMs: 5000, handoverWrapUpWaitMs: 100 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.room('participant-speech-start', { CallSid: RESIDENT }); // the cue waits for a pause
+  await s.tech(0).answered();
+  await s.tech(0).press('1');
+  await tick();
+  const reply = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Valve turned off.' });
+  assert.match(reply.body.message, /A technician has accepted and is joining the call now/);
+  assert.ok(s.logs.some((line) => line.includes('WRAPUP given in the update_transfer reply instead of the cue')));
+  await s.room('participant-speech-stop', { CallSid: RESIDENT });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.ok(!s.roomActions.includes('cue:wrapup'), 'not told twice');
+});
+
+test('wrap-up: not sent while Iris is muted for hold music (the resident could not hear her)', async (t) => {
+  const s = await setup({ holdDelayMs: 10 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await new Promise((resolve) => setTimeout(resolve, 40)); // music on, Iris muted
+  await s.techAcceptsAndJoins(0);
+  await tick();
+  assert.ok(!s.roomActions.includes('cue:wrapup'));
+  assert.equal(s.report().result, 'connected');
+});
+
+test('wrap-up: default wait for Iris to start replying is 6 s', () => {
+  const env = { TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'x', TWILIO_PHONE_NUMBER: TWILIO_NUMBER, ELEVENLABS_API_KEY: 'x', ELEVENLABS_AGENT_ID: 'agent_x', TECH_NUMBERS: '+15550000001', PUBLIC_BASE_URL: PUBLIC, TOOL_SECRET: 'x', TWILIO_AGENT_APP_SID: APP_SID };
+  assert.equal(loadConfig(env).handoverWrapUpWaitMs, 6000);
+  assert.equal(loadConfig({ ...env, HANDOVER_WRAPUP_WAIT_MS: '4000' }).handoverWrapUpWaitMs, 4000);
 });
