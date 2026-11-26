@@ -77,6 +77,8 @@ function buildReport(t) {
     // cued to tell the resident. `cue` is what Iris heard; the resident heard Iris's reply.
     // Messages Iris took for the maintenance team with the take_message tool.
     messages: (t.messages || []).map((m) => ({ text: m.text, at: iso(m.at), seconds_from_tool_call: after(m.at) })),
+    // Troubleshooting progress Iris reported for the technician brief (update_transfer).
+    progress_updates: (t.progressUpdates || []).map((p) => ({ text: p.text, at: iso(p.at), seconds_from_tool_call: after(p.at), in_brief: p.used })),
     resident_updates: (t.residentUpdates || []).map((u) => ({
       technician: u.tech + 1,
       number: t.techs[u.tech].number,
@@ -100,6 +102,8 @@ function buildReport(t) {
       answered_at: iso(tech.answeredAt),
       pressed_1_at: iso(tech.pressedAt),
       outcome_at: iso(tech.outcomeAt),
+      // Exactly what this technician heard before "Press 1" (null if they never answered).
+      briefing: tech.briefing || null,
       line_closed_at: iso(tech.endedAt),
       seconds_from_tool_call: {
         dialled: after(tech.dialledAt),
@@ -508,6 +512,10 @@ function renderDetail(r) {
 <tr><th>Tool call (start)</th><td>${time(r.started_at)}</td></tr>
 <tr><th>Finished</th><td>${time(r.finished_at)}</td></tr>
 <tr><th>Summary</th><td class="text">${dash(r.summary)}</td></tr>
+<tr><th>Troubleshooting progress</th><td class="text">${(r.progress_updates || []).length
+    ? r.progress_updates.map((p) => `${esc(p.text)} <span class="note">(+${esc(p.seconds_from_tool_call)}s${p.in_brief ? '' : ', after the search'})</span>`).join('<br>')
+    : '-'}</td></tr>
+<tr><th>Technician heard</th><td class="text">${(r.technicians || []).filter((tech) => tech.briefing).map((tech) => `${esc(tech.number)}: "${esc(tech.briefing)} Press 1 to connect to the resident."`).join('<br>') || '-'}</td></tr>
 <tr><th>Message</th><td class="text">${(r.messages || []).length
     ? r.messages.map((m) => `<strong>${esc(m.text)}</strong><br><span class="note">saved by Iris at ${time(m.at)}</span>`).join('<br><br>')
     : '-'}</td></tr>

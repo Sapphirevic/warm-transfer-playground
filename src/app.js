@@ -248,6 +248,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       cueQueue: [], //                     cues to Iris waiting for a pause (see queueCue)
       cueGapTimer: null,
       cueMaxTimer: null,
+      pendingHandover: null, //            set while waiting for Iris to finish a sentence (handOver)
+      handoverTimer: null,
     };
   }
 
@@ -547,6 +549,33 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     resident.cueQueue = [];
   }
 
+  // A technician has joined the room. Iris is muted and the room hears "A technician has
+  // joined the call", but not in the middle of her sentence (decision.md D25): if she is
+  // talking, wait until Twilio reports she stopped, or HANDOVER_MAX_WAIT_MS at the latest.
+  // Order unchanged: Iris muted, hold music off, then the announcement.
+  function handOver(residentCallSid, t) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident) return;
+    let done = false;
+    const go = (why) => {
+      if (done) return;
+      done = true;
+      clearTimeout(resident.handoverTimer);
+      resident.handoverTimer = null;
+      resident.pendingHandover = null;
+      if (resident.ended) return;
+      if (why) log(`HANDOVER ${why}: muting Iris and announcing the technician`);
+      setAgentMuted(residentCallSid, true, 'technician joined');
+      endHold(t, 'technician joined');
+      announce(residentCallSid, 'joined');
+    };
+    const irisTalking = Boolean(resident.agent.callSid && resident.speaking.has(resident.agent.callSid));
+    if (!irisTalking) return go(null);
+    log(`HANDOVER waiting for Iris to finish her sentence before muting her`);
+    resident.pendingHandover = go;
+    resident.handoverTimer = setTimeout(() => go('waited the maximum time'), config.handoverMaxWaitMs);
+  }
+
   // Technician i did not take the call and technician i+1 is about to be called.
   // The cue goes to Iris's leg only: the resident never hears it, they hear Iris say it.
   //   1. cue to Iris ("Technician 1 did not pick up. Calling technician 2 now.")
@@ -742,6 +771,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     if (!resident || resident.ended) return;
     resident.ended = true;
     dropCues(residentCallSid, 'resident gone');
+    clearTimeout(resident.handoverTimer);
+    resident.pendingHandover = null;
     log(`RESIDENT gone resident=${residentCallSid} (${why})`);
     scheduleTranscript(residentCallSid);
 
@@ -884,6 +915,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       mutePeriods: [], //      [{ from, to }] Iris muted
       residentUpdates: [], //  [{ tech, at }] "technician N did not pick up" cues sent to Iris
       messages: [], //         [{ text, at }] messages Iris took with the take_message tool
+      progress: null, //       latest troubleshooting progress (update_transfer), used in the brief
+      progressUpdates: [], //  [{ text, at, used }] every progress sentence Iris sent
     };
     transfers.set(callSid, t);
     timing(t, 'tool_call');
@@ -912,11 +945,53 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         `tell them in one short sentence that technician 1 did not pick up and you are now trying the next one, ${afterUpdate}` +
         `When you hear "${ANNOUNCEMENTS.joined}", a technician is talking with the resident: say nothing at all from then on, do not introduce anyone and do not answer, even if spoken to. ` +
         `If you hear "${ANNOUNCEMENTS.unavailable}", the search is over: apologise and offer to take a message${holdDelayMs === null ? '' : ' (the resident can hear you again; stop calling skip_turn)'}. ` +
-        'If they give one, call the take_message tool with it, then tell them it is saved for the maintenance team, and keep replying to them until they are done.',
+        'If they give one, call the take_message tool with it, then tell them it is saved for the maintenance team, and keep replying to them until they are done. ' +
+        'While troubleshooting, each time you learn something the technician should know (what the resident sees, what they have checked or done, what you advised), ' +
+        'call the update_transfer tool with one short sentence summarising the progress so far. The technician hears the latest one when they answer.',
     });
     setImmediate(() => startSearch(t));
     // Give Iris time to say "please hold" before the music replaces her.
     if (holdDelayMs !== null) scheduleHold(t, holdDelayMs);
+  });
+
+  // The brief a technician hears: the summary from request_transfer, plus the latest
+  // troubleshooting progress from update_transfer if Iris has sent any (D24).
+  function briefFor(t) {
+    const sentence = (s) => (/[.!?]$/.test(s) ? s : `${s}.`);
+    const summary = sentence(t.summary);
+    return t.progress ? `${summary} Progress so far: ${sentence(t.progress)}` : summary;
+  }
+
+  // Iris reports troubleshooting progress during the search. Only the latest sentence is
+  // used in the technician brief (built when a technician answers); all are kept in the report.
+  app.post('/tool/update-transfer', secretHook, (req, res) => {
+    const callSid = String((req.body && (req.body.call_sid || req.body.parent_call_sid)) || '').trim();
+    const text = String((req.body && req.body.progress) || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+
+    if (!CALL_SID_RE.test(callSid)) {
+      log(`TOOL update-transfer rejected: call_sid=${callSid || '(missing)'} is not a Twilio call SID`);
+      return res.status(400).json({ status: 'error', message: 'call_sid is missing or not a Twilio call SID. Is the tool sending the {{call_sid}} dynamic variable?' });
+    }
+    if (!text) {
+      return res.status(400).json({ status: 'error', message: 'progress is empty. Send one short sentence on what has been found or done so far.' });
+    }
+    const t = transfers.get(callSid);
+    if (!t) {
+      log(`TOOL update-transfer rejected: no search running for call_sid=${callSid}`);
+      return res.status(404).json({ status: 'error', message: 'No technician search for this call yet. Call request_transfer first.' });
+    }
+    if (t.status !== 'searching') {
+      // Too late to matter (a technician is connected or the search is over), but harmless.
+      t.progressUpdates.push({ text, at: Date.now(), used: false });
+      saveReport(t);
+      log(`PROGRESS resident=${callSid} (after the search, not briefed): ${JSON.stringify(text)}`);
+      return res.json({ status: 'noted', message: 'Noted. The search is already over, so carry on with the caller.' });
+    }
+    t.progress = text;
+    t.progressUpdates.push({ text, at: Date.now(), used: true });
+    saveReport(t);
+    log(`PROGRESS resident=${callSid} +${secs(t.startedAt, Date.now())} after tool call: ${JSON.stringify(text)}`);
+    res.json({ status: 'noted', message: 'Saved for the technician brief. Keep troubleshooting with the caller.' });
   });
 
   // Iris took a message for the maintenance team (usually after "No technician is
@@ -993,7 +1068,13 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const query = `resident=${t.residentCallSid}&tech=${i}`;
     const vr = new VoiceResponse();
     const gather = vr.gather({ numDigits: 1, timeout: 6, action: `${base}/tech/accept?${query}`, method: 'POST' });
-    gather.say(`${t.summary} Press 1 to connect to the resident.`);
+    // Built now, when the technician answers, so it carries the latest troubleshooting
+    // progress Iris reported with update_transfer (decision.md D24).
+    const brief = briefFor(t);
+    tech.briefing = brief;
+    if (attempt === 1) log(`BRIEF tech#${i} ${tech.number}: "${brief}"`);
+    saveReport(t);
+    gather.say(`${brief} Press 1 to connect to the resident.`);
     // No key pressed: Twilio falls through to here and we ask again.
     vr.redirect({ method: 'POST' }, `${base}/tech/answered?${query}&attempt=${attempt + 1}`);
     sendTwiml(res, vr);
@@ -1142,16 +1223,16 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         t.timings.technician_joined = timing(t, 'technician_joined', `conference=${body.ConferenceSid}`);
         logTimingSummary(t);
         finish(t, 'connected', t.timings.technician_joined);
-        // Silence Iris, stop the resident's hold music, then tell the room. In this order
-        // nobody hears Iris react to the announcement and the resident does not miss it.
-        setAgentMuted(residentCallSid, true, 'technician joined');
-        endHold(t, 'technician joined');
-        announce(residentCallSid, 'joined');
+        handOver(residentCallSid, t);
       }
     } else if (event === 'participant-speech-start' || event === 'participant-speech-stop') {
       // Who is talking, so cues to Iris can wait for a pause (see queueCue).
       if (event === 'participant-speech-start') resident.speaking.add(body.CallSid);
       else resident.speaking.delete(body.CallSid);
+      // Iris finished her sentence: a waiting handover can go ahead now (see handOver).
+      if (event === 'participant-speech-stop' && body.CallSid === resident.agent.callSid && resident.pendingHandover) {
+        resident.pendingHandover('Iris finished her sentence');
+      }
       // One short line per event (instead of the raw webhook) to see what Twilio reports.
       const nameOf = (sid) => (sid === residentCallSid ? 'resident'
         : sid === resident.agent.callSid ? 'Iris'

@@ -118,6 +118,19 @@ Run the same command again whenever `PUBLIC_BASE_URL` changes; it then updates t
 
 **Agent branches.** If the agent uses ElevenLabs versioning, calls run on its **main** branch unless told otherwise. That includes the tools, prompt and first message. To test a branch, copy its ID (it starts with `agtbrch_`) into `.env` as `ELEVENLABS_BRANCH_ID` and restart the server. The server then sends it as `branch_id` with every call. The startup line `agent branch :` shows which branch is in use. A tool or prompt edited only on a branch has no effect on calls to main: on 2026-11-26 a test call ran on main, which had no working `request_transfer`, so Iris repeated "I'm reaching out to a technician" without ever starting the search.
 
+**Create the `update_transfer` tool.** A **Webhook** tool Iris calls during troubleshooting, so the technician hears the progress so far:
+
+| Setting | Value |
+| --- | --- |
+| Name | `update_transfer` |
+| Description | Call this while troubleshooting, each time you learn something the technician should know (what the caller sees, what they have checked or done, what you advised). Send one short sentence summarising the progress so far. |
+| Method / URL | `POST https://<your-ngrok-host>/tool/update-transfer` |
+| Header | `X-Tool-Secret`: same value as `TOOL_SECRET` |
+| Body `progress` | String, required, filled in by the LLM: "One short sentence summarising the troubleshooting progress so far, for the technician." |
+| Body `call_sid` | String, required, Dynamic variable `call_sid` |
+
+The server keeps the **latest** progress sentence. A technician's brief is built **when they answer**: *"<summary>. Progress so far: <latest progress>. Press 1 to connect to the resident."* Every progress sentence, and exactly what each technician heard, is in the report (**Troubleshooting progress**, **Technician heard**). The log shows `PROGRESS …` and `BRIEF tech#N …`.
+
 **Create the `take_message` tool.** A second **Webhook** tool, so a message Iris takes is saved into the call's report:
 
 | Setting | Value |
@@ -204,6 +217,7 @@ If you can change the number's configuration: Twilio Console > Phone Numbers > y
 | `POST /twilio/agent-leg` | Twilio (TwiML App) | Iris's leg. Calls register-call and returns the ElevenLabs stream TwiML |
 | `POST /twilio/resident-status` | Twilio | Status of an outbound-started resident call. A hang-up cancels the search |
 | `POST /tool/request-transfer` | ElevenLabs (`X-Tool-Secret`) | Start the technician search. Body: `{"summary": "...", "call_sid": "CA..."}` |
+| `POST /tool/update-transfer` | ElevenLabs (`X-Tool-Secret`) | Latest troubleshooting progress, added to the technician brief. Body: `{"progress": "...", "call_sid": "CA..."}` |
 | `POST /tool/take-message` | ElevenLabs (`X-Tool-Secret`) | Save a message Iris took into the call's report. Body: `{"message": "...", "call_sid": "CA..."}` |
 | `POST /tech/answered` | Twilio | Technician picked up. Plays the summary + "Press 1" prompt straight away |
 | `POST /tech/amd` | Twilio | Async answering-machine detection result. A machine is hung up and counted as voicemail |

@@ -94,6 +94,8 @@ function loadConfig(env = process.env) {
     cueQuietGapMs: Number(env.CUE_QUIET_GAP_MS) >= 0 && env.CUE_QUIET_GAP_MS !== undefined && env.CUE_QUIET_GAP_MS !== '' ? Number(env.CUE_QUIET_GAP_MS) : 700,
     // ...but never longer than this before they are sent anyway.
     cueMaxWaitMs: Number(env.CUE_MAX_WAIT_MS) > 0 ? Number(env.CUE_MAX_WAIT_MS) : 8000,
+    // When a technician joins mid-sentence, Iris is muted once she stops talking, but no later than this.
+    handoverMaxWaitMs: Number(env.HANDOVER_MAX_WAIT_MS) > 0 ? Number(env.HANDOVER_MAX_WAIT_MS) : 6000,
     holdMusicUrl: (env.HOLD_MUSIC_URL || 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical').trim(),
     // After a call ends, when to ask ElevenLabs for the transcript (it takes a moment to be ready).
     transcriptRetryMs: [5_000, 20_000, 60_000],

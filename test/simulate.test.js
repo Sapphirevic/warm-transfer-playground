@@ -31,7 +31,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 // holdDelayMs: null = no hold music (most tests), a number = music starts that long after the tool call.
 // holdResumeMs: how long after a "technician did not pick up" update the music comes back.
-async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000 } = {}) {
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000 } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const agentLegs = []; //      conferences(sid).participants.create(...) -> Iris joining
@@ -125,6 +125,7 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
     holdResumeMs,
     cueQuietGapMs,
     cueMaxWaitMs,
+    handoverMaxWaitMs,
     holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
     transcriptRetryMs: [5],
     reportsDir: path.join(tmp, 'reports'),
@@ -1599,7 +1600,8 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const cueKinds = (s) => s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind'));
 
 test('cue pause: a technician update waits while the resident is talking, then plays after a short pause', async (t) => {
-  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], cueQuietGapMs: 60, cueMaxWaitMs: 2000 });
+  // Margins of hundreds of ms: s.room() itself waits ~25 ms, so a tight gap made this flaky.
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], cueQuietGapMs: 400, cueMaxWaitMs: 5000 });
   t.after(s.close);
   await s.residentAsksForTransfer();
   await s.room('participant-speech-start', { CallSid: RESIDENT }); // resident is describing the smoke
@@ -1611,9 +1613,9 @@ test('cue pause: a technician update waits while the resident is talking, then p
   assert.ok(s.logs.some((line) => line.includes('CUE waiting for a pause before "Technician 1 did not pick up.')));
 
   await s.room('participant-speech-stop', { CallSid: RESIDENT });
-  await pause(20);
+  await pause(100);
   assert.deepEqual(s.agentCues, [], 'waits for the quiet gap, not just the end of a word');
-  await pause(80);
+  await pause(500);
   assert.deepEqual(cueKinds(s), ['tech-update'], 'played once the room has been quiet');
   assert.ok(s.logs.some((line) => /CUE ready after \d+\.\ds \(pause\): "Technician 1 did not pick up/.test(line)));
   const update = s.report().resident_updates[0];
@@ -1698,4 +1700,106 @@ test('cue pause: each talking start/stop is logged as one SPEECH line naming who
   assert.match(lines[0], /SPEECH resident started talking \(talking now: resident\)$/);
   assert.match(lines[1], /SPEECH Iris started talking \(talking now: resident, Iris\) \[1 cue\(s\) waiting\]$/);
   assert.match(lines[2], /SPEECH resident stopped talking \(talking now: Iris\) \[1 cue\(s\) waiting\]$/);
+});
+
+// ---------------------------------------------------------------- troubleshooting progress in the technician brief (D24)
+
+test('brief: the technician hears the summary plus the latest troubleshooting progress Iris reported', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  const reply = await s.residentAsksForTransfer();
+  assert.match(reply.body.message, /call the update_transfer tool with one short sentence summarising the progress so far/);
+
+  // Before any progress: the summary alone.
+  const early = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: '  Water is under the sink;   resident turned the valve off ' });
+  assert.equal(early.status, 200);
+  assert.equal(early.body.status, 'noted');
+  await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Valve is off and the leak has slowed to a drip' });
+
+  const prompt = await s.tech(0).answered();
+  assert.match(prompt.text, /Leak under the kitchen sink in unit 4B\. Progress so far: Valve is off and the leak has slowed to a drip\. Press 1 to connect to the resident\./, 'latest progress only, with full stops added');
+  assert.ok(s.logs.some((line) => line.includes('BRIEF tech#0') && line.includes('Progress so far: Valve is off')));
+  assert.ok(s.logs.some((line) => line.includes('PROGRESS resident=') && line.includes('Water is under the sink; resident turned the valve off')));
+
+  const report = s.report();
+  assert.deepEqual(report.progress_updates.map((p) => p.text), ['Water is under the sink; resident turned the valve off', 'Valve is off and the leak has slowed to a drip']);
+  assert.ok(report.progress_updates.every((p) => p.in_brief));
+  assert.equal(report.technicians[0].briefing, 'Leak under the kitchen sink in unit 4B. Progress so far: Valve is off and the leak has slowed to a drip.');
+  const page = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(page.includes('<th>Troubleshooting progress</th>'));
+  assert.ok(page.includes('<th>Technician heard</th>'));
+});
+
+test('brief: progress sent after the first technician answered reaches the next technician', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const first = await s.tech(0).answered();
+  assert.doesNotMatch(first.text, /Progress so far/, 'nothing reported yet');
+  await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Resident found the main valve and closed it' });
+  await s.tech(0).press('2');
+  await tick();
+  const second = await s.tech(1).answered();
+  assert.match(second.text, /Progress so far: Resident found the main valve and closed it\./);
+  const repeat = await s.tech(1).answered(2);
+  assert.match(repeat.text, /Progress so far: Resident found the main valve and closed it\./, 'repeated prompts carry it too');
+});
+
+test('update_transfer: needs the secret, a real call_sid, a running search and non-empty progress; after the search it is kept but not briefed', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentIsWithAva();
+  assert.equal((await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'x' }, null)).status, 401);
+  assert.equal((await s.json('/tool/update-transfer', { call_sid: 'nope', progress: 'x' })).status, 400);
+  const before = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'x' });
+  assert.equal(before.status, 404, 'no search yet');
+  assert.match(before.body.message, /Call request_transfer first/);
+
+  await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'Leak.' });
+  await tick();
+  assert.equal((await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: '   ' })).status, 400);
+  await s.techAcceptsAndJoins(0);
+  const late = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Technician is fixing it' });
+  assert.equal(late.status, 200);
+  const last = s.report().progress_updates.at(-1);
+  assert.equal(last.text, 'Technician is fixing it');
+  assert.equal(last.in_brief, false);
+});
+
+// ---------------------------------------------------------------- Iris finishes her sentence before the handover (D25)
+
+test('handover: a technician joining while Iris is talking waits for her to finish, then she is muted and the room told', async (t) => {
+  const s = await setup({ handoverMaxWaitMs: 2000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+  await s.room('participant-speech-start', { CallSid: iris }); // Iris mid-sentence
+  await s.techAcceptsAndJoins(0);
+  await tick();
+  assert.deepEqual(s.roomActions, [], 'not muted mid-sentence');
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER waiting for Iris to finish her sentence')));
+  assert.equal(s.transfer().status, 'connected', 'the transfer itself is connected straight away');
+
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await tick();
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined'], 'muted only after she finished, then the announcement');
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris finished her sentence: muting Iris')));
+});
+
+test('handover: if Iris keeps talking, she is muted after the maximum wait; if she is quiet, at once', async (t) => {
+  const s = await setup({ handoverMaxWaitMs: 120 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.room('participant-speech-start', { CallSid: s.agentLegs[0].callSid });
+  await s.techAcceptsAndJoins(0);
+  assert.deepEqual(s.roomActions, []);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined']);
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER waited the maximum time')));
+
+  const quiet = await setup();
+  t.after(quiet.close);
+  await quiet.residentAsksForTransfer();
+  await quiet.techAcceptsAndJoins(0);
+  assert.deepEqual(quiet.roomActions, ['mute:true', 'announce:joined'], 'Iris not talking: immediate, as before');
 });

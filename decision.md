@@ -15,6 +15,30 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - progress in the technician brief, Iris finishes her sentence (v0.7.0)
+
+**D24. The technician brief includes Iris's troubleshooting progress.**
+
+On call `CA072e0b…f975` (14:49 UTC) the technician who answered heard only the summary fixed at the tool call ("Caller reports their air conditioning is not working…"), with none of the troubleshooting that followed. The team asked for the progress to be included.
+
+What changed:
+- New `update_transfer` tool (`POST /tool/update-transfer`, `progress` + `call_sid`, secret-protected like the others).
+- The server keeps the latest sentence. The brief is built when a technician answers: "<summary>. Progress so far: <latest>. Press 1…". Repeated prompts and later technicians get the newest progress.
+- Progress sent after the search ends is kept but marked "not briefed".
+- The report adds `progress_updates` and each technician's exact `briefing`; the log adds `PROGRESS` and `BRIEF`.
+- The `request_transfer` reply tells Iris to use the tool.
+- Briefing stays in Twilio's voice (unchanged decision).
+
+**D25. A technician joining mid-sentence waits for Iris to finish before she is muted.**
+
+Previously Iris was muted the instant the technician entered the room, cutting her off. Now, if Twilio reports her talking, the server waits for her speech-stop (or `HANDOVER_MAX_WAIT_MS`, 6 s) before muting her, ending any hold and announcing "A technician has joined the call". The transfer is still marked connected at once; only the mute and the announcement wait. If she is quiet, it happens immediately, as before.
+
+Checks:
+- 72/72 tests, 3 runs. 5 new tests cover: brief with latest progress, progress reaching a later technician and repeated prompts, tool validation and the after-search case, handover waiting for speech-stop, handover max wait, and the quiet case.
+- Broken on purpose: muting at once fails 2 tests; leaving progress out of the brief fails 2.
+
+Real-call data behind D23 (`CA072e0b…`, SPEECH log): Twilio reports talking for both the resident and Iris. Turn gaps are short (Iris stopped, resident started 0.14 s later), so the 0.7 s quiet rule rarely triggers and cues hit the 8 s maximum. The rule needs tuning next.
+
 ### 2026-11-26 - cues to Iris wait for a pause (v0.6.0)
 
 **D23. Technician-update and "no technician" cues are held until nobody is talking.**
