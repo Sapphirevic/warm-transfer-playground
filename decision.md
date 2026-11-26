@@ -16,6 +16,27 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - Iris keeps the thread after "technician did not pick up"; no repeated announcement (v0.13.1–v0.14.2)
+
+**D35. The "technician did not pick up" news tells Iris to respond to the caller's last answer first, give the news in one sentence, then continue exactly where she left off. The `request_transfer` reply no longer asks her to announce the search a second time.**
+
+What the real calls showed:
+- **The announcement was said twice.** On call `CAc275…47c8` (18:03) Iris said "I'm reaching out to a technician right now…" twice, word for word: once from her prompt before the tool call, once because the reply said "Tell the resident you are finding a technician". The reply now says she has already told them. On call `CA73ec…` (18:07) she said it once.
+- **She lost the thread.** On call `CA9eb7…3a09` (18:14) the update went as a spoken cue, because she made no tool call within 8 s while the caller fetched a plunger. Iris said "Technician 1 didn't pick up… Let's keep going", dropping "I have my plunger now". The same "tell them, then carry on" wording was in the `update_transfer` reply.
+
+Both the `update_transfer` reply and the `request_transfer` reply's explanation of the spoken cue now say: respond to what the caller just said, give the news in one short sentence, then continue with the next step without restarting or repeating.
+
+Also seen on these calls:
+- **Ring time.** `RING_TIMEOUT_SEC` counts from dialling. +233550623035 took 15.6 s to start ringing (call `CAc275…`, 18:03), so it rang only about 4.6 s at 20 s. Victoria now runs 40–60 s.
+- **Unreachable phones.** Code 480 means the handset was unreachable at the time; the code is fine.
+- **The resident's phone is in the technician list.** +233240469445 is the resident phone used for testing, so it is always busy as technician 3.
+- **Dialling the number directly gives "application error".** The phone number's incoming-call URL was never moved to the new ngrok address. No script updates it; it is a Twilio Console step.
+
+Checks:
+- `npm test` once per change: 99/99 (server behaviour only).
+- Call `CA128a…0880` (18:16) confirmed the D33 handover on a real call: both phones heard "The technician is with us now, I'll hand you over", and the technician confirmed it.
+- The new D35 wording is not yet heard on a call.
+
 ### 2026-11-26 - Iris is told at press 1, in the reply she actually gets (v0.14.0)
 
 **D34. The first `update_transfer` reply after the technician presses 1 asks Iris to tell the caller in one sentence that the technician is joining. The technician comes in once she has said it and is quiet. The fallback wait drops from 8 s to 5 s.**
