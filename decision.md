@@ -16,6 +16,30 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - handover through the update_transfer reply, no spoken cue (v0.13.0)
+
+**D33. Iris is asked to hand over in her next `update_transfer` reply, not by a spoken cue. Replaces the cue part of D32; the brief fix in D32 stays.**
+
+Call `CA43b6…b5c6` (17:44 UTC), as Victoria reported it: "Iris literally told me nothing… the tech joined… it did not communicate clearly to the tech." The server log, the ElevenLabs transcript and the technician's live transcript agree:
+- **The cue cut Iris off.** "Technician here. Hand over in one sentence." went out at 17:45:28.38 while the resident was answering. Iris started "Thanks, that…" at 28.98, and the cue cut her off (ElevenLabs 0:44, cut short).
+- **Her prompt took the cue as an order to go silent.** She answered it with `skip_turn` (0:45), so after 6 s the server connected the technician without her.
+- **The technician** came off hold into the fragment "Thanks, that helps", then silence.
+
+What does work on every real call: Iris calls `update_transfer` after each answer from the caller and speaks right after the reply. On this call she called it 2.0 s after the technician joined.
+
+The flow now:
+- **Technician joins** muted, on hold.
+- **Iris's next `update_transfer` reply** says: "The technician has joined, is listening, and already has the brief. Say one short sentence handing the caller over…".
+- **At that reply** the technician comes off hold, still muted.
+- **When Iris has said her sentence** and been quiet for 1.5 s: she is muted, the technician unmuted, and "A technician has joined the call" goes to her leg only.
+- **Fallback:** no `update_transfer` within `HANDOVER_REPLY_WAIT_MS` (8 s), or no speech within 6 s of the reply. Once Iris is quiet, she is muted, the technician comes in, and the room hears "A technician has joined the call". On call `CAcac6…` (17:11) she made no such call after the join, so that call would have used the fallback.
+- **Also fixed:** at the end of a call, Iris's mute or unmute is skipped if the call has already ended (the 20404 error in the log).
+
+Checks:
+- 96/96 tests, one run. **These only show the server does this; they cannot show what Iris will do.**
+- The two real calls above were replayed against the new logic: on one, the reply path; on the other, the fallback.
+- Not yet heard on a real call.
+
 ### 2026-11-26 - Iris hands over in her own words; the brief can't be cut short (v0.12.0)
 
 **D32. One announcement only: Iris's handover sentence. The technician hears the whole brief before "Press 1". This replaces D31 (the press-1 wrap-up cue).**
@@ -591,3 +615,4 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-26 | D30 technician on hold until Iris finishes | (1) `npm test` 3 runs, (2) 3 deliberate breaks, then restored, (3) Twilio library participant update params and Conference TwiML checked | 90/90 pass each run. Breaks fail 6, 2 and 1 tests; code restored byte-identical. Library sends Muted/Hold/HoldUrl/HoldMethod together; muted="true" renders |
 | 2026-11-26 | D31 wrap-up cue at press 1 | (1) `npm test` 3 runs, (2) 1 deliberate break, then restored from backup (2 more stopped on request), (3) - | 95/95 pass each run. Break (no cue): 18 tests fail |
 | 2026-11-26 | D32 Iris hands over; brief before "Press 1" | (1) `npm test` once, (2) 2 real reports re-rendered, (3) the TwiML in the tests is made by the real Twilio library | 96/96 pass. Both real pages build and still show one at a time |
+| 2026-11-26 | D33 handover via update_transfer reply | (1) `npm test` once, (2) last two real calls replayed against the new logic | 96/96 pass (server behaviour only). Call 17:44: Iris called update_transfer 2.0 s after the join (reply path). Call 17:11: she did not (fallback) |

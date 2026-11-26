@@ -37,11 +37,6 @@ const ANNOUNCEMENTS = {
   // silent (skip_turn), so without this she does not answer the resident once the technician
   // has gone. Worded as an instruction so it works without a prompt change.
   left: 'The technician has left the call. Please speak to the caller again.',
-  // The handoff (D32). Iris alone hears this once she has finished what she was saying, then
-  // hands over to the technician in one sentence that both people hear. The technician
-  // already has the brief and the progress from Twilio, so she does not repeat them. Kept
-  // short: it is the one pause in the handoff (about 2 s).
-  intro: 'Technician here. Hand over in one sentence.',
 };
 // Played to Iris's leg only (the resident does not hear it) when technician i (0-based)
 // did not take the call and another one is about to be called. Iris's prompt reacts to it.
@@ -583,6 +578,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     if (agent.state !== 'in' || !agent.callSid || agent.muted === muted) return Promise.resolve(false);
     agent.muted = muted;
     return inOrder(resident, async () => {
+      if (resident.ended || agent.state !== 'in') { agent.muted = !muted; return false; } // call over meanwhile
       try {
         await client.conferences(resident.conferenceSid).participants(agent.callSid).update({ muted });
         log(`AGENT Iris ${muted ? 'muted' : 'unmuted'} in ${roomName(residentCallSid)} (${why})`);
@@ -764,111 +760,38 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     if (kept.length) pumpCues(residentCallSid);
   }
 
-  // ---------------------------------------------------------------- handoff (D30, D32)
+  // ---------------------------------------------------------------- handoff (D30, D33)
   //
-  // A technician has pressed 1 and is in the room. Iris hands over in her own words, heard by
-  // the resident and the technician, and is never cut off (decision.md D25, D27, D30, D32):
+  // A technician has pressed 1 and is in the room. No spoken cue to Iris here: on real calls
+  // they cut her off and her prompt answered "Technician here..." with skip_turn (D33).
+  // What does work on real calls is the update_transfer reply: she calls it after each
+  // answer from the caller and speaks right after it. So:
   //
-  //  1. Waiting. The technician joins muted and is put on hold ("One moment please", then
-  //     silence) while Iris finishes what she is saying: until she has been quiet for
-  //     HANDOVER_GRACE_MS. A pause followed by more speech keeps them waiting.
-  //  2. Handover. The technician comes off hold, still muted, so they hear the room. Iris
-  //     alone hears "Technician here. Hand over in one sentence." (about 2 s, the one pause).
-  //     She is quiet at this point, so it cannot cut her off. She hands over in one sentence
-  //     that both people hear; the technician already has the brief, so no repeat.
-  //  3. Done. Once Iris has said that and been quiet for HANDOVER_GRACE_MS, she is muted, the
-  //     technician unmuted, and Iris alone hears "A technician has joined the call" (her
-  //     prompt then keeps her silent; nobody else hears it). If she does not start the introduction within
-  //     HANDOVER_WRAPUP_WAIT_MS of the cue ending, this happens anyway.
-  //
-  // HANDOVER_MAX_WAIT_MS (30 s) is a safety net on each of the two waits, for Twilio never
-  // reporting that Iris stopped. With no Iris in the room, the technician is unmuted at once
-  // and the whole room hears the announcement.
+  //  1. The technician joins muted and is put on hold ("One moment please", then silence).
+  //  2. Iris's next update_transfer reply tells her to hand over in one sentence. At that
+  //     moment the technician comes off hold, still muted, so they hear just that sentence.
+  //  3. When she has said it and been quiet for HANDOVER_GRACE_MS: Iris muted, technician
+  //     unmuted, and Iris alone hears "A technician has joined the call" (her cue to stay
+  //     silent).
+  //  Fallback: no update_transfer call within HANDOVER_REPLY_WAIT_MS (8 s), or she does not
+  //  start talking within HANDOVER_WRAPUP_WAIT_MS of the reply: once she is quiet, Iris is
+  //  muted, the technician brought in and the whole room hears "A technician has joined the
+  //  call". HANDOVER_MAX_WAIT_MS (30 s) is the overall safety net.
 
-  // Roughly how long Twilio takes to say a line, so Iris's reply can be told apart from
-  // anything she said before the cue finished.
-  const speechMs = (text) => text.split(/\s+/).length * config.speechMsPerWord;
+  const HANDOVER_REPLY = 'The technician has joined, is listening, and already has the brief. Say one short sentence handing the caller over to the technician, for example: "The technician is with us now, I\'ll hand you over." Do not repeat the details and do not ask anything else.';
 
   function handOver(residentCallSid, t) {
     const resident = residentCalls.get(residentCallSid);
     if (!resident) return;
     const techSid = t.winner !== null ? t.techs[t.winner].callSid : null;
-    let phase = 'waiting'; // waiting -> intro -> done
-    let techHeld = false;
-    let intro = null; //     { endsAt, started }
     const irisSid = resident.agent.callSid;
     const irisTalking = () => Boolean(irisSid && resident.speaking.has(irisSid));
-    const clearTimers = () => {
-      clearTimeout(resident.handoverTimer);
-      clearTimeout(resident.handoverGraceTimer);
-      clearTimeout(resident.handoverIntroTimer);
-      resident.handoverTimer = null;
-      resident.handoverGraceTimer = null;
-      resident.handoverIntroTimer = null;
-    };
-    const safetyNet = (what) => {
-      resident.handoverTimer = setTimeout(() => {
-        log(`WARN HANDOVER no quiet moment from Iris within ${config.handoverMaxWaitMs / 1000}s (${what}); going ahead so the technician is not left waiting`);
-        if (phase === 'waiting') startIntro('waited the maximum time');
-        else complete('waited the maximum time');
-      }, config.handoverMaxWaitMs);
-    };
-
-    // 3. Iris muted, technician unmuted.
-    const complete = (why) => {
-      if (phase === 'done') return;
-      phase = 'done';
-      clearTimers();
-      resident.pendingHandover = null;
-      if (resident.ended) return;
-      if (why) log(`HANDOVER ${why}: muting Iris, the technician can talk now`);
-      timing(t, 'handoff_done');
-      setAgentMuted(residentCallSid, true, 'technician joined');
-      bringInTechnician(residentCallSid, techSid, { unhold: false });
-      endHold(t, 'technician joined');
-      queueCueNow(residentCallSid, 'kind=joined', ANNOUNCEMENTS.joined); // Iris only: her cue to go quiet
-    };
-
-    // 2. The introduction.
-    const startIntro = (why) => {
-      if (phase !== 'waiting') return;
-      phase = 'intro';
-      clearTimers();
-      if (resident.ended) return;
-      log(`HANDOVER ${why}: technician off hold (still muted), Iris introduces them`);
-      timing(t, 'handoff_intro_cued');
-      // Both must hear her: Iris unmuted and the resident off hold, if either was not.
-      setAgentMuted(residentCallSid, false, 'introducing the technician');
-      endHold(t, 'technician joined');
-      if (techHeld) bringInTechnician(residentCallSid, techSid, { unhold: true, unmute: false });
-      t.handoffBy = 'iris';
-      saveReport(t);
-      cueAgent(residentCallSid, 'kind=intro', ANNOUNCEMENTS.intro).then((sent) => {
-        if (phase !== 'intro') return;
-        if (!sent) return complete('Iris could not be cued');
-        const cueMs = speechMs(ANNOUNCEMENTS.intro);
-        intro = { endsAt: Date.now() + cueMs, started: false };
-        resident.handoverIntroTimer = setTimeout(() => {
-          if (phase === 'intro' && !intro.started) complete(`Iris did not start the introduction within ${config.handoverWrapUpWaitMs / 1000}s`);
-        }, cueMs + config.handoverWrapUpWaitMs);
-      });
-      safetyNet('introduction');
-    };
-
-    // Go on to the next step once Iris has been quiet for the grace period.
-    const whenQuiet = (why) => {
-      clearTimeout(resident.handoverGraceTimer);
-      resident.handoverGraceTimer = setTimeout(() => {
-        resident.handoverGraceTimer = null;
-        if (irisTalking()) return;
-        if (phase === 'waiting') startIntro(why);
-        else if (phase === 'intro' && intro && intro.started) complete('Iris introduced the technician');
-      }, config.handoverGraceMs);
-    };
+    let phase = 'awaiting-reply'; // -> handing-over -> done (or fallback -> done)
+    let spoke = false; //          Iris started a sentence after the handover reply
+    let techOffHold = false;
 
     if (!irisSid || resident.agent.state !== 'in') {
-      // No Iris to introduce them: straight in, and the whole room is told.
-      phase = 'done';
+      // No Iris to hand over: straight in, and the whole room is told.
       log('HANDOVER Iris is not in the room: technician unmuted, room told');
       t.handoffBy = 'room announcement';
       bringInTechnician(residentCallSid, techSid, { unhold: false });
@@ -877,27 +800,78 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       return;
     }
 
-    // 1. Waiting for Iris to finish what she is saying.
-    if (techSid && (irisTalking() || config.handoverGraceMs > 0)) {
-      techHeld = true;
-      holdTechnician(residentCallSid, techSid);
-    }
+    const clearTimers = () => {
+      clearTimeout(resident.handoverTimer);
+      clearTimeout(resident.handoverGraceTimer);
+      clearTimeout(resident.handoverIntroTimer);
+      resident.handoverTimer = null;
+      resident.handoverGraceTimer = null;
+      resident.handoverIntroTimer = null;
+    };
+    const complete = (why, { roomAnnouncement }) => {
+      if (phase === 'done') return;
+      phase = 'done';
+      clearTimers();
+      resident.pendingHandover = null;
+      if (resident.ended) return;
+      log(`HANDOVER ${why}: muting Iris, the technician can talk now`);
+      timing(t, 'handoff_done');
+      t.handoffBy = roomAnnouncement ? 'room announcement' : 'iris';
+      saveReport(t);
+      setAgentMuted(residentCallSid, true, 'technician joined');
+      bringInTechnician(residentCallSid, techSid, { unhold: !techOffHold });
+      endHold(t, 'technician joined');
+      if (roomAnnouncement) announce(residentCallSid, 'joined');
+      else queueCueNow(residentCallSid, 'kind=joined', ANNOUNCEMENTS.joined); // Iris only
+    };
+    // Runs fn once Iris has been quiet for the grace period (never mid-sentence).
+    const whenQuiet = (fn) => {
+      clearTimeout(resident.handoverGraceTimer);
+      resident.handoverGraceTimer = setTimeout(() => {
+        resident.handoverGraceTimer = null;
+        if (!irisTalking()) fn();
+      }, config.handoverGraceMs);
+    };
+    const fallback = (why) => {
+      if (phase === 'done' || phase === 'fallback') return;
+      phase = 'fallback';
+      log(`HANDOVER ${why}: bringing the technician in once Iris is quiet, with the room announcement`);
+      const go = () => complete('fallback', { roomAnnouncement: true });
+      if (irisTalking()) return; // her speech-stop moves it on
+      whenQuiet(go);
+    };
+
+    if (techSid) holdTechnician(residentCallSid, techSid);
+    log('HANDOVER technician on hold; Iris hands over in her next update_transfer reply');
+
     resident.pendingHandover = {
-      // Called from /conference/status for Iris's speech events.
+      // From /tool/update-transfer: the reply that asks Iris to hand over (once).
+      takeReply() {
+        if (phase !== 'awaiting-reply') return null;
+        phase = 'handing-over';
+        clearTimeout(resident.handoverIntroTimer);
+        timing(t, 'handoff_reply_sent');
+        log('HANDOVER Iris asked (update_transfer reply) to hand over; technician off hold, still muted');
+        techOffHold = true;
+        bringInTechnician(residentCallSid, techSid, { unhold: true, unmute: false });
+        resident.handoverIntroTimer = setTimeout(() => {
+          if (phase === 'handing-over' && !spoke) fallback(`Iris did not start talking within ${config.handoverWrapUpWaitMs / 1000}s of the reply`);
+        }, config.handoverWrapUpWaitMs);
+        return HANDOVER_REPLY;
+      },
+      // From /conference/status: Iris's speech events.
       irisSpeech(started) {
         if (started) {
           clearTimeout(resident.handoverGraceTimer);
           resident.handoverGraceTimer = null;
-          if (phase === 'waiting') log('HANDOVER Iris is talking: the technician waits on hold until she finishes');
-          // Her reply to the intro cue, not the tail of something she said before it.
-          if (phase === 'intro' && intro && !intro.started && Date.now() >= intro.endsAt - config.speechMsPerWord * 2) {
-            intro.started = true;
-            timing(t, 'handoff_intro_started');
-            log('HANDOVER Iris is introducing the technician');
+          if (phase === 'handing-over' && !spoke) {
+            spoke = true;
+            timing(t, 'handoff_iris_speaking');
           }
-        } else {
-          whenQuiet('Iris finished her sentence');
+          return;
         }
+        if (phase === 'handing-over' && spoke) whenQuiet(() => complete('Iris handed over', { roomAnnouncement: false }));
+        else if (phase === 'fallback') whenQuiet(() => complete('fallback', { roomAnnouncement: true }));
       },
       cancel(why) {
         if (phase === 'done') return;
@@ -907,12 +881,11 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         log(`HANDOVER cancelled: ${why}`);
       },
     };
-    safetyNet('waiting for her to finish');
-    if (irisTalking()) {
-      log('HANDOVER Iris is talking: the technician waits on hold until she finishes');
-      return;
-    }
-    whenQuiet('Iris is quiet');
+    resident.handoverIntroTimer = setTimeout(() => fallback(`no update_transfer call within ${config.handoverReplyWaitMs / 1000}s`), config.handoverReplyWaitMs);
+    resident.handoverTimer = setTimeout(() => {
+      log(`WARN HANDOVER not finished after ${config.handoverMaxWaitMs / 1000}s; bringing the technician in now`);
+      complete('waited the maximum time', { roomAnnouncement: true });
+    }, config.handoverMaxWaitMs);
   }
 
   // A cue to Iris that is sent straight away (she is muted by then, so it cannot cut her off).
@@ -1425,9 +1398,11 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       // A technician accepted and is joining (or has joined): Iris wraps up instead of
       // starting a new question that would be cut off at the handover (D27).
       const joining = t.status === 'bridging' || t.status === 'connected';
-      const message = joining
+      const resident = residentCalls.get(callSid);
+      const handover = t.status === 'connected' && resident && resident.pendingHandover ? resident.pendingHandover.takeReply() : null;
+      const message = handover || (joining
         ? 'A technician has accepted and is joining the call now. Finish your current point in a few words and do not ask a new question or start a new topic.'
-        : 'Noted. The search is already over, so carry on with the caller.';
+        : 'Noted. The search is already over, so carry on with the caller.');
       return res.json({ status: 'noted', message });
     }
     t.progress = text;
