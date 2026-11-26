@@ -1,5 +1,7 @@
 # Warm-transfer playground (Twilio + ElevenLabs)
 
+> **Branch `full-call-recording`** (built on `sequential-with-updates`). Adds Twilio recordings of each person's own line and live transcripts, shown on each report page under **Twilio summary and recordings**. Nothing was removed. See [Twilio recordings and transcripts](#twilio-recordings-and-transcripts).
+
 > **Branch `sequential-with-updates`** (built on `agent-stays-on-call`). Iris stays on the call with the resident and the technician (a three-way call). Technicians are called **one at a time**, and each time one does not take the call, **Iris tells the resident** before the next one is called. There is no parallel calling on this branch. On `main` Iris hands the resident over and leaves. See [Switching between versions](#switching-between-versions).
 
 A small Express server for trying out a warm transfer from an ElevenLabs agent ("Iris") to a human technician.
@@ -263,6 +265,32 @@ The detail page of each report has a **Transcript** section: what Iris and the c
 - While the technician is on the call Iris is muted. If the model still produced a reply, it appears struck through as **Iris (muted, not heard)**: nobody on the call heard it.
 - Anything said after Iris has left the call is not in the transcript, because nothing is transcribing it. (On `main` that is the whole resident-technician conversation.) The Twilio recording still has the audio.
 - Only calls where Iris asked for a technician have a report, so only those have a transcript here.
+
+## Twilio recordings and transcripts
+
+This branch adds Twilio's side of the call to every report. Nothing was taken away: the room recording and the ElevenLabs transcript are still there.
+
+**Recordings** (Twilio stores them; the report page plays them through the server, so no Twilio login is needed):
+
+| Recording | Channels | What is on it |
+| --- | --- | --- |
+| Room | 1 | Everything said in the conference, mixed. No hold music, no technician brief. (Was already there.) |
+| Resident's line | 2 | The resident's voice, and everything the resident heard: Iris, hold music, updates, technician. |
+| Technician N's line | 2 | The technician's voice, and everything they heard: the brief and "Press 1", then the resident. Only for technicians who picked up. |
+
+**Live transcripts** (Twilio Real-Time Transcription, `both_tracks`) on the resident's line, each technician's line and Iris's leg. Each line arrives tagged with its track. On a person's own line, `inbound` is their voice (certain) and `outbound` is what they hear (named from the call's timeline). On Iris's leg it is the other way round: `inbound` is the room, `outbound` is Iris.
+
+**Post-call transcripts** (Twilio Conversational Intelligence). The Twilio account already transcribes every recording automatically. The report page fetches those transcripts by recording SID, including the account's summary operators (`MaintenanceSummary`, `ResidentExtraction`). This is read only: the Intelligence service is part of AppWork's account setup and is not changed.
+
+**Report page layout.** Each report shows the summary table, then tabs: **Merged transcript** (opens first), **ElevenLabs transcript**, **Twilio transcripts** (live and post-call, one collapsible block per phone line), **Recordings**, **Technicians** (with the call sequence) and **Raw record**. The chosen tab is kept in the address (`#twilio`), so a reload stays on it.
+
+**Merged transcript** ([src/merge.js](src/merge.js)). One table for the whole call. *Who* spoke comes from Twilio: channel 1 of the resident's recording is the resident, channel 1 of a technician's recording is that technician (the live transcript's inbound track if there is no post-call transcript). *What* they said comes from ElevenLabs when it heard the same words, because its text is more accurate; otherwise Twilio's text is kept. When ElevenLabs merged two people into one line, Twilio's text is kept so nobody is given words they did not say. Iris's lines are her own words from ElevenLabs, and Twilio's brief, the room announcement and the events come from the server's record. The "Text from" column says where each line's text came from; hovering it shows what Twilio heard.
+
+Settings in `.env`, all on by default: `RECORD_LEGS`, `LIVE_TRANSCRIPTION`, `LIVE_TRANSCRIPTION_IRIS_LEG`. If Iris ever fails to connect, try `LIVE_TRANSCRIPTION_IRIS_LEG=false` first.
+
+Checked on real calls (2026-11-26): channel 1 of a line's recording is the person on that line and channel 2 is what they heard; the technician's live transcription carries on after they join the room; Iris connects normally with transcription on her leg. Recordings and transcription are billed by Twilio per minute.
+
+New endpoints: `POST /twilio/recording-status` and `POST /twilio/live-transcription` (Twilio), `GET /reports/:sid/recordings/:recording.mp3` (this machine only).
 
 ## Hold music
 

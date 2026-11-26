@@ -4,3 +4,6 @@ node_modules/
 reports/
 # Copy of the ElevenLabs agent's settings taken before they were changed.
 .elevenlabs-agent-backup.json
+# Kept local for now, not shared yet.
+docs/
+test/

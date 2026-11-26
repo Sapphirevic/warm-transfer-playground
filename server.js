@@ -42,6 +42,10 @@ app.listen(config.port, (err) => {
   console.log(`  hold music  : ${config.holdDelayMs === null
     ? 'off'
     : `starts ${config.holdDelayMs / 1000}s after the tool call, back ${config.holdResumeMs / 1000}s after each update`}`);
+  console.log(`  recordings  : room always; resident and technician lines ${config.recordLegs ? 'on (dual-channel)' : 'off'}`);
+  console.log(`  live text   : ${config.liveTranscription
+    ? `on for the resident and technician lines${config.liveTranscriptionIrisLeg ? ' and Iris\'s leg' : ''}`
+    : 'off'}`);
   for (const warning of config.warnings) console.log(`WARN ${warning}`);
   console.log(`  reports     : http://localhost:${config.port}/reports`);
   console.log('Start a test call with:  node scripts/start-call.js +15551234567');
