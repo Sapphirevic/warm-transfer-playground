@@ -1335,8 +1335,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     // Branch "iris-troubleshoots-while-searching": with hold music off (the default here)
     // Iris stays with the resident during the search and helps them troubleshoot.
     const whileSearching = holdDelayMs === null
-      ? 'Tell the resident you are finding a technician and will stay with them meanwhile. ' +
-        'While technicians are being called, help the resident troubleshoot the problem: ask short questions about it and suggest simple, safe checks they can do. ' +
+      // She has already told the caller before calling the tool (her prompt), so the reply
+      // must not ask her to say it again: on a real call that made her say it twice.
+      ? 'You have already told the resident you are reaching out to a technician, so do not say it again. ' +
+        'Go straight on: while technicians are being called, help the resident troubleshoot the problem: ask short questions about it and suggest simple, safe checks they can do. ' +
         'Never suggest electrical, gas or structural work, and if anything sounds dangerous (gas smell, sparks, smoke, flooding) tell them to get to safety and call emergency services. '
       : 'Say one short sentence asking the resident to hold while you connect them with a technician, then say nothing more. ' +
         `Hold music starts for the resident in about ${Math.round(holdDelayMs / 1000)} seconds and they cannot hear you while it plays. `;
