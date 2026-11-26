@@ -1024,7 +1024,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     saveReport(t);
     const failed = news.map((u) => `Technician ${u.tech + 1} did not pick up.`).join(' ');
     log(`UPDATE told Iris in the update_transfer reply: "${failed} ${calling}"`);
-    return `${failed} ${calling} Tell the caller this briefly in one sentence, then carry on troubleshooting.`;
+    // Keep the thread of the conversation (D35): on real calls "tell the caller, then carry
+    // on" made her drop the caller's last answer and restart ("let's keep going").
+    return `${failed} ${calling} First respond to what the caller just said, in a few words. Then tell them in one short sentence that the technician did not pick up and you are calling the next one. Then continue the troubleshooting exactly where you left off: the next step or question, without repeating anything already asked or answered.`;
   }
 
   // ---------------------------------------------------------------- technician calls

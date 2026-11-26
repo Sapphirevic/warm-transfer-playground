@@ -1872,7 +1872,7 @@ test('update via tool reply: technician news reaches Iris in her next update_tra
   assert.equal(s.techCalls().length, 2, 'next technician dialled at once');
 
   const news = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Fan is dead; outlet works' });
-  assert.match(news.body.message, /Technician 1 did not pick up\. Technician 2 is being called now\. Tell the caller this briefly in one sentence/);
+  assert.match(news.body.message, /Technician 1 did not pick up\. Technician 2 is being called now\. First respond to what the caller just said, in a few words\. .*continue the troubleshooting exactly where you left off/, 'keeps the thread (D35)');
   const again = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Still dead' });
   assert.match(again.body.message, /No change: technician 2 is still being called/, 'told only once');
 
