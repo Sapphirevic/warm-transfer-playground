@@ -31,7 +31,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 // holdDelayMs: null = no hold music (most tests), a number = music starts that long after the tool call.
 // holdResumeMs: how long after a "technician did not pick up" update the music comes back.
-async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40 } = {}) {
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000 } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const agentLegs = []; //      conferences(sid).participants.create(...) -> Iris joining
@@ -123,6 +123,8 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
     agentAppSid: APP_SID,
     holdDelayMs,
     holdResumeMs,
+    cueQuietGapMs,
+    cueMaxWaitMs,
     holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
     transcriptRetryMs: [5],
     reportsDir: path.join(tmp, 'reports'),
@@ -257,7 +259,7 @@ test('call start: resident goes into a room and Iris is added to it as her own l
   assert.match(inbound.text, /endConferenceOnExit="true"/, 'the resident leaving ends the call');
   assert.match(inbound.text, /waitUrl=""/, 'silence, not hold music, until Iris joins');
   assert.match(inbound.text, /record="record-from-start"/);
-  assert.match(inbound.text, /statusCallbackEvent="start end join leave"/);
+  assert.match(inbound.text, /statusCallbackEvent="start end join leave speaker"/);
   assert.doesNotMatch(inbound.text, /<Connect>/, 'the ElevenLabs stream is not on the resident leg any more');
   assert.equal(s.registered.length, 0);
   assert.equal(s.agentLegs.length, 0, 'Iris is added once the resident is in the room');
@@ -1589,4 +1591,95 @@ test('troubleshooting branch: no hold music, Iris is told to troubleshoot safely
   assert.deepEqual(s.roomActions, ['cue:tech-update:0', 'mute:true', 'announce:joined'], 'Iris is muted the moment the technician is in the room');
   assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, true);
   assert.deepEqual(s.report().hold_periods, []);
+});
+
+// ---------------------------------------------------------------- cues wait for a pause (D23)
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const cueKinds = (s) => s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind'));
+
+test('cue pause: a technician update waits while the resident is talking, then plays after a short pause', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], cueQuietGapMs: 60, cueMaxWaitMs: 2000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.room('participant-speech-start', { CallSid: RESIDENT }); // resident is describing the smoke
+
+  await s.tech(0).status('failed');
+  await pause(120);
+  assert.deepEqual(s.agentCues, [], 'not played over the resident');
+  assert.equal(s.techCalls().length, 2, 'the next technician is still dialled at once');
+  assert.ok(s.logs.some((line) => line.includes('CUE waiting for a pause before "Technician 1 did not pick up.')));
+
+  await s.room('participant-speech-stop', { CallSid: RESIDENT });
+  await pause(20);
+  assert.deepEqual(s.agentCues, [], 'waits for the quiet gap, not just the end of a word');
+  await pause(80);
+  assert.deepEqual(cueKinds(s), ['tech-update'], 'played once the room has been quiet');
+  assert.ok(s.logs.some((line) => /CUE ready after \d+\.\ds \(pause\): "Technician 1 did not pick up/.test(line)));
+  const update = s.report().resident_updates[0];
+  assert.ok(update.cued_at && update.waited_for_pause_seconds >= 0.1, 'the report records when it was played and how long it waited');
+});
+
+test('cue pause: a cue never cuts Iris off; it waits until she stops talking', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], cueQuietGapMs: 40, cueMaxWaitMs: 2000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+  await s.room('participant-speech-start', { CallSid: iris }); // Iris is giving safety advice
+
+  await s.tech(0).status('no-answer');
+  await pause(100);
+  assert.deepEqual(s.agentCues, [], 'not played while Iris is speaking');
+
+  await s.room('participant-speech-start', { CallSid: RESIDENT }); // resident answers straight after
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await pause(100);
+  assert.deepEqual(s.agentCues, [], 'still waiting: the resident is talking now');
+
+  await s.room('participant-speech-stop', { CallSid: RESIDENT });
+  await pause(100);
+  assert.deepEqual(cueKinds(s), ['tech-update']);
+});
+
+test('cue pause: if the talking never stops, the cue plays after the maximum wait', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], cueQuietGapMs: 40, cueMaxWaitMs: 150 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.room('participant-speech-start', { CallSid: RESIDENT });
+
+  await s.tech(0).status('busy');
+  await pause(60);
+  assert.deepEqual(s.agentCues, []);
+  await pause(160);
+  assert.deepEqual(cueKinds(s), ['tech-update'], 'sent anyway so the update is not lost');
+  assert.ok(s.logs.some((line) => line.includes('(waited the maximum time)')));
+});
+
+test('cue pause: an update still waiting when a technician joins is dropped, never announced', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], cueQuietGapMs: 40, cueMaxWaitMs: 5000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.room('participant-speech-start', { CallSid: RESIDENT });
+  await s.tech(0).status('no-answer');
+  await s.techAcceptsAndJoins(1); // technician 2 accepts while the resident is still talking
+  await s.room('participant-speech-stop', { CallSid: RESIDENT });
+  await pause(100);
+  assert.deepEqual(s.agentCues, [], '"technician 1 did not pick up" would be out of date');
+  assert.ok(s.logs.some((line) => line.includes('CUE dropped 1 waiting cue(s) (technician joined)')));
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined'], 'Iris is muted and the room told, as before');
+});
+
+test('cue pause: "no technician" waits for a pause too, replaces a waiting update, and talking events stay out of the log', async (t) => {
+  const s = await setup({ cueQuietGapMs: 40, cueMaxWaitMs: 5000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.room('participant-speech-start', { CallSid: RESIDENT });
+  await s.tech(0).status('no-answer'); // update waits
+  await s.tech(1).status('no-answer'); // the last one: the waiting update is now out of date
+  await pause(80);
+  assert.deepEqual(s.agentCues, []);
+  await s.room('participant-speech-stop', { CallSid: RESIDENT });
+  await pause(100);
+  assert.deepEqual(cueKinds(s), ['unavailable'], 'only "No technician is available"');
+  assert.equal(s.logs.filter((line) => line.includes('participant-speech')).length, 0, 'talking events are not logged as webhooks');
 });

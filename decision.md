@@ -15,6 +15,32 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - cues to Iris wait for a pause (v0.6.0)
+
+**D23. Technician-update and "no technician" cues are held until nobody is talking.**
+
+Found on call `CAcafd40…ef29` (14:20 UTC, Victoria1, no hold music):
+- **Cue 1 lost.** It played to Iris at ~33 s, while the resident was mid-sentence. It is missing from the transcript, Iris never gave the technician 1 update, and her reply came at 44 s, 17 s after the resident began.
+- **Cue 2 interrupted Iris.** It arrived at 49 s, while she was speaking, and cut her off mid-way through safety advice ("…get everyone out of the apartment right…"; the transcript marks it interrupted).
+
+Cause: cues went out the instant a technician failed, whoever was talking.
+
+Fix:
+- The conference now subscribes to Twilio's `speaker` events (`participant-speech-start` / `-stop`, per Twilio's TwiML Conference docs; only the first participant's setting counts, which is the resident's).
+- Cues queue until nobody has talked for `CUE_QUIET_GAP_MS` (700 ms), or until `CUE_MAX_WAIT_MS` (8 s).
+- What belongs with a cue happens when it is actually sent: unmute, end hold, and the music-back timer (relevant only if hold music is switched back on).
+- A waiting update is dropped if a technician joins or the search ends. "No technician" then replaces any waiting update.
+- Speech events are not written to the log.
+- The report adds `cued_at` / `waited_for_pause_seconds`.
+- The next technician is still dialled immediately.
+
+Checks:
+- 66/66 tests, 3 runs. 5 new tests cover: resident talking, Iris talking, talking that never stops (max wait), a technician joining while a cue waits (dropped), and "no technician" replacing a waiting update (no speech events in the log).
+- Broken on purpose: ignoring who is talking fails 5 tests; not dropping on join fails 1.
+- To confirm on a real call: Twilio sends speaker events for Iris's leg as well as the resident's, and 0.7 s feels natural.
+
+Also noted 2026-11-26: the team no longer uses hold music. It stays off by default on this branch. Removing the hold code entirely can be a separate clean-up step.
+
 ### 2026-11-26 - requirements confirmed, prompt step 1 done
 
 **Team requirements (restated 2026-11-26) against what is built:**

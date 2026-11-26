@@ -83,6 +83,9 @@ function buildReport(t) {
       cue: `Technician ${u.tech + 1} did not pick up. Calling technician ${u.tech + 2} now.`,
       at: iso(u.at),
       seconds_from_tool_call: after(u.at),
+      // When the cue was actually played to Iris: it waits for a pause in the talking (D23).
+      cued_at: iso(u.cuedAt),
+      waited_for_pause_seconds: u.cuedAt ? Math.round((u.cuedAt - u.at) / 100) / 10 : null,
     })),
     // Filled in from ElevenLabs after the call (see buildTranscript).
     transcript: t.transcript || null,

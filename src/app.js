@@ -82,7 +82,11 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const fields = LOGGED_FIELDS.filter((key) => req.body && req.body[key] !== undefined)
       .map((key) => `${key}=${req.body[key]}`)
       .join(' ');
-    log(`WEBHOOK ${req.method} ${req.originalUrl} ${fields}${valid ? '' : ' [INVALID SIGNATURE - rejected]'}`);
+    // Who-is-talking events arrive several times a second; logging each would drown the log.
+    const speechEvent = /^participant-speech-/.test(String((req.body && req.body.StatusCallbackEvent) || ''));
+    if (!speechEvent || !valid) {
+      log(`WEBHOOK ${req.method} ${req.originalUrl} ${fields}${valid ? '' : ' [INVALID SIGNATURE - rejected]'}`);
+    }
 
     if (!valid) return res.status(403).send('Invalid Twilio signature');
     next();
@@ -240,6 +244,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       agent: { state: 'none', callSid: null, joins: 0, firstMessage: null, muted: false, pendingCue: null },
       onHold: false, //                    resident is hearing hold music
       roomQueue: Promise.resolve(), //     see inOrder()
+      speaking: new Set(), //              call SIDs talking right now (Twilio speaker events)
+      cueQueue: [], //                     cues to Iris waiting for a pause (see queueCue)
+      cueGapTimer: null,
+      cueMaxTimer: null,
     };
   }
 
@@ -264,7 +272,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         recordingStatusCallbackEvent: 'completed',
         statusCallback: callback,
         statusCallbackMethod: 'POST',
-        statusCallbackEvent: ['start', 'end', 'join', 'leave'],
+        // "speaker": Twilio reports when each participant starts and stops talking, so cues
+        // to Iris can wait for a pause (only the first participant's setting counts).
+        statusCallbackEvent: ['start', 'end', 'join', 'leave', 'speaker'],
       },
       roomName(residentCallSid)
     );
@@ -476,6 +486,67 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       }));
   }
 
+  // Cues to Iris wait for a pause (decision.md D23). Played while someone is talking, a cue
+  // is lost in the caller's speech (and delays Iris's reply) or cuts Iris off mid-sentence.
+  // A cue is sent once nobody has been talking for CUE_QUIET_GAP_MS, or after CUE_MAX_WAIT_MS
+  // at the latest. onDone(sent) runs when it has been sent, or skipped because Iris is not in
+  // the room; it is not called for a cue dropped because the call moved on.
+  function queueCue(residentCallSid, query, text, onDone) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || resident.ended) return;
+    resident.cueQueue.push({ query, text, queuedAt: Date.now(), onDone });
+    if (resident.speaking.size) log(`CUE waiting for a pause before "${text}" (someone is talking)`);
+    pumpCues(residentCallSid);
+  }
+
+  function pumpCues(residentCallSid) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident || resident.ended || !resident.cueQueue.length) return;
+    if (!resident.cueMaxTimer) {
+      resident.cueMaxTimer = setTimeout(() => sendNextCue(residentCallSid, 'waited the maximum time'), config.cueMaxWaitMs);
+    }
+    clearTimeout(resident.cueGapTimer);
+    resident.cueGapTimer = null;
+    if (resident.speaking.size) return; // a speech-stop event calls this again
+    resident.cueGapTimer = setTimeout(() => {
+      resident.cueGapTimer = null;
+      if (!resident.speaking.size) sendNextCue(residentCallSid, 'pause');
+    }, config.cueQuietGapMs);
+  }
+
+  function sendNextCue(residentCallSid, why) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident) return;
+    clearTimeout(resident.cueGapTimer);
+    clearTimeout(resident.cueMaxTimer);
+    resident.cueGapTimer = null;
+    resident.cueMaxTimer = null;
+    const cue = resident.cueQueue.shift();
+    if (!cue || resident.ended) return;
+    const waited = ((Date.now() - cue.queuedAt) / 1000).toFixed(1);
+    const { agent } = resident;
+    if (agent.state !== 'in' || !agent.callSid) {
+      log(`CUE skipped "${cue.text}": Iris is not in ${roomName(residentCallSid)}`);
+      if (cue.onDone) cue.onDone(false);
+    } else {
+      log(`CUE ready after ${waited}s (${why}): "${cue.text}"`);
+      cueAgent(residentCallSid, cue.query, cue.text).then((sent) => { if (cue.onDone) cue.onDone(sent); });
+    }
+    if (resident.cueQueue.length) pumpCues(residentCallSid);
+  }
+
+  // Throws away queued cues that are no longer true (e.g. a technician joined meanwhile).
+  function dropCues(residentCallSid, why) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!resident) return;
+    clearTimeout(resident.cueGapTimer);
+    clearTimeout(resident.cueMaxTimer);
+    resident.cueGapTimer = null;
+    resident.cueMaxTimer = null;
+    if (resident.cueQueue.length) log(`CUE dropped ${resident.cueQueue.length} waiting cue(s) (${why})`);
+    resident.cueQueue = [];
+  }
+
   // Technician i did not take the call and technician i+1 is about to be called.
   // The cue goes to Iris's leg only: the resident never hears it, they hear Iris say it.
   //   1. cue to Iris ("Technician 1 did not pick up. Calling technician 2 now.")
@@ -499,11 +570,17 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     saveReport(t);
 
     log(`UPDATE technician ${i + 1} did not take the call, Iris tells the resident +${secs(t.startedAt, at)} after tool call`);
-    cueAgent(t.residentCallSid, `kind=tech-update&tech=${i}`, techUpdateLine(i));
-    setAgentMuted(t.residentCallSid, false, `telling the resident technician ${i + 1} did not pick up`);
-    endHold(t, `Iris is telling the resident technician ${i + 1} did not pick up`);
-
-    if (config.holdDelayMs !== null) scheduleHold(t, config.holdResumeMs);
+    const update = t.residentUpdates[t.residentUpdates.length - 1];
+    // Everything that belongs with the cue happens when it is actually sent (after a pause):
+    // Iris's voice back, music off, and the music-back timer counted from there.
+    queueCue(t.residentCallSid, `kind=tech-update&tech=${i}`, techUpdateLine(i), (sent) => {
+      update.cuedAt = Date.now();
+      saveReport(t);
+      if (!sent || t.status !== 'searching') return;
+      setAgentMuted(t.residentCallSid, false, `telling the resident technician ${i + 1} did not pick up`);
+      endHold(t, `Iris is telling the resident technician ${i + 1} did not pick up`);
+      if (config.holdDelayMs !== null) scheduleHold(t, config.holdResumeMs);
+    });
   }
 
   // ---------------------------------------------------------------- technician calls
@@ -637,10 +714,13 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     if (!resident || resident.ended) return;
     const { agent } = resident;
     if (agent.state === 'in' && agent.callSid) {
-      // Cue first, then music off and Iris's voice back on, all while the cue plays.
-      cueAgent(t.residentCallSid, 'kind=unavailable', ANNOUNCEMENTS.unavailable);
-      setAgentMuted(t.residentCallSid, false, 'no technician available');
-      endHold(t, 'no technician available');
+      // Any technician update still waiting is out of date now. Then the cue (after a
+      // pause), and with it music off and Iris's voice back on.
+      dropCues(t.residentCallSid, 'search over: no technician');
+      queueCue(t.residentCallSid, 'kind=unavailable', ANNOUNCEMENTS.unavailable, () => {
+        setAgentMuted(t.residentCallSid, false, 'no technician available');
+        endHold(t, 'no technician available');
+      });
     } else if (agent.state === 'joining') {
       endHold(t, 'no technician available');
       agent.pendingCue = { query: 'kind=unavailable', text: ANNOUNCEMENTS.unavailable };
@@ -661,6 +741,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const resident = residentCalls.get(residentCallSid);
     if (!resident || resident.ended) return;
     resident.ended = true;
+    dropCues(residentCallSid, 'resident gone');
     log(`RESIDENT gone resident=${residentCallSid} (${why})`);
     scheduleTranscript(residentCallSid);
 
@@ -1053,10 +1134,11 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         const pending = resident.agent.pendingCue;
         if (pending) {
           resident.agent.pendingCue = null;
-          cueAgent(residentCallSid, pending.query, pending.text);
+          queueCue(residentCallSid, pending.query, pending.text);
         }
       } else if (who === 'technician' && t.status === 'bridging') {
         t.status = 'connected';
+        dropCues(residentCallSid, 'technician joined'); // a waiting "did not pick up" is no longer true
         t.timings.technician_joined = timing(t, 'technician_joined', `conference=${body.ConferenceSid}`);
         logTimingSummary(t);
         finish(t, 'connected', t.timings.technician_joined);
@@ -1066,9 +1148,16 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         endHold(t, 'technician joined');
         announce(residentCallSid, 'joined');
       }
+    } else if (event === 'participant-speech-start' || event === 'participant-speech-stop') {
+      // Who is talking, so cues to Iris can wait for a pause (see queueCue).
+      if (event === 'participant-speech-start') resident.speaking.add(body.CallSid);
+      else resident.speaking.delete(body.CallSid);
+      pumpCues(residentCallSid);
     } else if (event === 'participant-leave') {
       const who = whoIs(residentCallSid, resident, t, body);
       resident.present.delete(body.CallSid);
+      resident.speaking.delete(body.CallSid);
+      pumpCues(residentCallSid);
       log(`CONFERENCE ${who} left ${roomName(residentCallSid)} call=${body.CallSid} (now ${resident.present.size} in the room)`);
 
       if (who === 'agent') resident.agent.state = 'left';

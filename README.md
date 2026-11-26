@@ -29,6 +29,14 @@ When technician N does not take the call and technician N+1 is about to be calle
 3. Iris hears the cue and, as her system prompt tells her, says one sentence to the resident, such as "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold."
 4. `HOLD_MUSIC_RESUME_SEC` seconds after the update started (default `13`), the music comes back and Iris is muted again, unless a technician has accepted or the search has ended by then.
 
+**Cues wait for a pause.** Twilio reports when each person on the call starts and stops talking (the conference's `speaker` events). A cue to Iris, either a technician update or "No technician is available right now", is held until **nobody has been talking for 0.7 s** (`CUE_QUIET_GAP_MS`), or **8 s** at the latest (`CUE_MAX_WAIT_MS`).
+- It never cuts Iris off mid-sentence.
+- It never collides with the resident's speech. On a real call (2026-11-26, 14:20) a cue played over the resident was lost and delayed Iris's reply by about 10 s.
+- The next technician is still dialled at once. Only the announcement waits.
+- An update still waiting when a technician joins, or when the search ends, is dropped rather than announced late.
+- The log shows `CUE waiting for a pause…`, then `CUE ready after N.Ns (pause)`.
+- The report records `cued_at` and `waited_for_pause_seconds` for each update.
+
 The cue only ever contains positions (1, 2, 3), never phone numbers, so Iris has nothing private to read out. If Iris is not in the room at that moment (her leg dropped), the update is skipped and logged as `UPDATE skipped`; the search carries on.
 
 The server only sends the cue: what Iris says comes from her **ElevenLabs system prompt** (see step 4 of [Setup](#4-configure-the-elevenlabs-agent)). The tool reply also tells her what the cue means.

@@ -90,6 +90,10 @@ function loadConfig(env = process.env) {
     // When a technician does not take the call, the resident comes off hold so Iris can tell
     // them. This is how long after that the music starts again (and Iris is muted again).
     holdResumeMs,
+    // Cues to Iris wait for nobody to be talking for this long (D23)...
+    cueQuietGapMs: Number(env.CUE_QUIET_GAP_MS) >= 0 && env.CUE_QUIET_GAP_MS !== undefined && env.CUE_QUIET_GAP_MS !== '' ? Number(env.CUE_QUIET_GAP_MS) : 700,
+    // ...but never longer than this before they are sent anyway.
+    cueMaxWaitMs: Number(env.CUE_MAX_WAIT_MS) > 0 ? Number(env.CUE_MAX_WAIT_MS) : 8000,
     holdMusicUrl: (env.HOLD_MUSIC_URL || 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical').trim(),
     // After a call ends, when to ask ElevenLabs for the transcript (it takes a moment to be ready).
     transcriptRetryMs: [5_000, 20_000, 60_000],
