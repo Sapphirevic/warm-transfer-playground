@@ -11,9 +11,38 @@ Update it whenever a design choice is made or changed, and in the same commit as
 | `agent-stays-on-call` | `main` | Resident, Ava and technician share one conference. Ava stays, muted while the technician is on. Hold music during the search. Transcripts in reports. |
 | `inbound-calls` | - | On the remote; not reviewed in this log yet. |
 | `sequential-with-updates` | `agent-stays-on-call` | Technicians called one at a time. Iris (formerly Ava) tells the resident each time one does not pick up. Hold music during the search. |
-| `iris-troubleshoots-while-searching` | `sequential-with-updates` | No hold music: Iris starts the search as soon as she identifies an emergency and keeps troubleshooting with the resident; muted once the technician joins. **Current working branch.** |
+| `full-call-recording` | `sequential-with-updates` | Samuel's branch (on the fork): Twilio recordings of each person's own line, live transcripts, merged transcript on the report page. Merged into `iris-troubleshoots-while-searching` (D28). |
+| `iris-troubleshoots-while-searching` | `sequential-with-updates` | No hold music: Iris starts the search as soon as she identifies an emergency and keeps troubleshooting with the resident; muted once the technician joins. Includes `full-call-recording` (D28). **Current working branch.** |
 
 ## Decisions
+
+### 2026-11-26 - full-call-recording merged in (v0.9.0)
+
+**D28. Merge `fork/full-call-recording` (commit `4ac1868`, Samuel) into this branch.**
+
+What it adds, all on by default:
+- **Recordings:** a dual-channel recording of the resident's own line and of each technician's line, next to the room recording, which is always made (`RECORD_LEGS`).
+- **Live transcripts:** Twilio Real-Time Transcription of the resident's line, each technician's line (started before their brief), and Iris's leg (`LIVE_TRANSCRIPTION`, `LIVE_TRANSCRIPTION_IRIS_LEG`).
+- **Report page:** now in tabs (Merged transcript, ElevenLabs transcript, Twilio transcripts, Recordings, Technicians, Raw record). The report JSON has a new `twilio` section. Recordings play from the page.
+- **Post-call transcripts:** Twilio's transcripts of each recording are fetched when a report is opened, where the account has Conversational Intelligence set up.
+
+How the conflicts were resolved: both sides kept.
+- The call record keeps our speaker, cue-queue and handover fields, plus their `media`.
+- The transfer keeps our `progress` / `progressUpdates`, plus their `media`.
+- README banner rewritten for this branch.
+
+Nothing in our flow changed: no hold music, the cue queue, updates through `update_transfer`, the brief with progress, the update on accept, the handover grace, the sequence proof, and messages.
+
+Tests:
+- 3 transcript tests failed on `full-call-recording` by itself as well (56/59 there). The page now shows the same lines in the merged tab and the ElevenLabs tab, and the tests searched the whole page. They now look inside the ElevenLabs panel; every original assertion is kept, and the hold-marker count is checked in both tabs.
+- The recording flow had no tests, so 2 were added: the whole troubleshooting flow with recording on (no hold music, one at a time, brief with summary, Iris muted only after her sentence, every recording and live line in the report), and everything off.
+- To tell Samuel: those 3 tests fail on his branch.
+
+Checks:
+- 84/84 tests, 3 runs.
+- Config parsed with a dummy environment: defaults on/on/on, `false`/`off`/`0` turn each off, and a bad value is refused.
+- Broken on purpose 2 ways (resident line never recorded; Iris's live transcription dropped): 1 test fails each time. Code restored and matched the backup exactly.
+- Not yet checked on a real call.
 
 ### 2026-11-26 - Iris wraps up before the handover (v0.8.1)
 
@@ -456,3 +485,4 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | Flaky-test fix | 10 consecutive full runs after widening the 3 tight timing tests | 10/10 clean |
 | 2026-11-25 | D16 | `npm test` (3 new take_message tests), then message-saving removed on purpose and restored | 59/59 pass. 2 tests fail without saving. Code restored and matched the backup exactly |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |
+| 2026-11-26 | D28 merge of full-call-recording | (1) `npm test` 3 runs, (2) config flags parsed with a dummy env, (3) 2 deliberate breaks of the recording code, then restored | 84/84 pass each run. Flags default on, turn off, bad value refused. Each break fails 1 test; code restored byte-identical |

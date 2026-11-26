@@ -41,11 +41,18 @@ const techUpdateLine = (i) => `Technician ${i + 1} did not pick up. Calling tech
 const LOGGED_FIELDS = [
   'CallSid', 'ParentCallSid', 'CallStatus', 'Direction', 'From', 'To', 'AnsweredBy', 'MachineDetectionDuration',
   'Digits', 'StatusCallbackEvent', 'ConferenceSid', 'FriendlyName', 'ParticipantLabel', 'RecordingSid',
-  'RecordingStatus', 'CallDuration', 'SipResponseCode',
+  'RecordingStatus', 'RecordingDuration', 'RecordingChannels', 'CallDuration', 'SipResponseCode',
+  'TranscriptionEvent', 'Track',
 ];
+const RECORDING_SID_RE = /^RE[0-9a-f]{32}$/i;
 
 const secs = (from, to) => `${((to - from) / 1000).toFixed(1)}s`;
 const roomName = (residentCallSid) => `room-${residentCallSid}`;
+// Twilio sends recording start times as e.g. "Thu, 26 Nov 2026 11:54:30 +0000".
+const isoFromTwilio = (value) => {
+  const ms = Date.parse(value || '');
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+};
 
 /**
  * Live call state is in memory (it's a playground): restart the server and running
@@ -57,12 +64,17 @@ const roomName = (residentCallSid) => `room-${residentCallSid}`;
  * @param {Function} deps.registerCall  from createRegisterCall()
  * @param {object} [deps.conversations] from createConversationApi(); without it reports have no transcript
  * @param {Function} [deps.logger]
+ * @param {Function} [deps.fetchImpl] used to download recordings for the report page
  */
-function createApp({ config, client, registerCall, conversations = null, logger = console.log }) {
+function createApp({ config, client, registerCall, conversations = null, logger = console.log, fetchImpl = globalThis.fetch }) {
   const app = express();
   app.disable('x-powered-by');
 
   const base = config.publicBaseUrl;
+  // Twilio recordings of each person's own line and live transcripts (see "Twilio media").
+  const recordLegs = config.recordLegs === true;
+  const liveTranscription = config.liveTranscription === true;
+  const liveTranscriptionIrisLeg = liveTranscription && config.liveTranscriptionIrisLeg === true;
   const reports = createReportStore(config.reportsDir);
   const connectingFile = path.join(config.publicDir, 'connecting.mp3');
   const residentCalls = new Map(); // resident CallSid -> call record (see newResidentCall)
@@ -213,6 +225,171 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     }
   }
 
+  // ---------------------------------------------------------------- Twilio media
+  //
+  // Next to the room recording, Twilio records each person's own line (dual-channel: their
+  // voice on one channel, everything they hear on the other) and transcribes each line live:
+  //   resident leg   : the resident + everything they hear (Iris, hold music, technician)
+  //   technician leg : the brief and "Press 1", then the technician + everything they hear
+  //   Iris's leg     : live transcript only; she hears the whole room (her own leg is not recorded)
+  // Twilio also transcribes every recording after the call (Conversational Intelligence,
+  // set up on the account); the report page fetches those transcripts by recording SID.
+
+  const mediaFor = (residentCallSid) => {
+    const resident = residentCalls.get(residentCallSid);
+    return resident ? resident.media : null;
+  };
+
+  // Saves the report if this call has one (only calls where Iris asked for a technician do).
+  function persistMedia(residentCallSid) {
+    const t = transfers.get(residentCallSid);
+    if (t) saveReport(t);
+  }
+
+  const legName = (leg, technician) => (leg === 'technician' ? `technician ${technician}` : leg);
+
+  function upsertRecording(residentCallSid, entry) {
+    const media = mediaFor(residentCallSid);
+    if (!media || !entry.recording_sid) return;
+    const known = media.recordings.find((r) => r.recording_sid === entry.recording_sid);
+    const fresh = Object.fromEntries(Object.entries(entry).filter(([, v]) => v !== null && v !== undefined));
+    if (known) Object.assign(known, fresh);
+    else media.recordings.push({ kind: null, technician: null, call_sid: null, conference_sid: null, channels: null, status: null, duration_seconds: null, started_at: null, error: null, ...fresh });
+    persistMedia(residentCallSid);
+  }
+
+  // <Start><Transcription> for one call leg: both directions, each line sent to
+  // /twilio/live-transcription tagged with its track (inbound = the person on this line,
+  // outbound = what they hear).
+  function addLiveTranscription(vr, residentCallSid, leg, { tech = null, name = leg } = {}) {
+    const query = `resident=${residentCallSid}&leg=${leg}${tech === null ? '' : `&tech=${tech}`}`;
+    vr.start().transcription({
+      name,
+      track: 'both_tracks',
+      partialResults: false,
+      statusCallbackUrl: `${base}/twilio/live-transcription?${query}`,
+      statusCallbackMethod: 'POST',
+    });
+  }
+
+  // Iris's TwiML comes from ElevenLabs. The live transcription is put in front of its
+  // <Connect><Stream>, so it runs for as long as her leg does.
+  function withIrisLiveTranscription(xml, residentCallSid, joins) {
+    const vr = new VoiceResponse();
+    addLiveTranscription(vr, residentCallSid, 'iris', { name: `iris-${joins}` });
+    const start = vr.toString().replace(/^[\s\S]*?<Response>/, '').replace(/<\/Response>\s*$/, '');
+    if (!/<Response[^>]*>/.test(xml)) {
+      log(`ERROR live transcription not added to Iris's leg: the register-call TwiML has no <Response> (resident=${residentCallSid})`);
+      return xml;
+    }
+    return xml.replace(/<Response[^>]*>/, (open) => open + start);
+  }
+
+  // Starts the dual-channel recording of the resident's own line once they are in the room.
+  async function startResidentRecording(residentCallSid) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!recordLegs || !resident || resident.ended || resident.legRecordingRequested) return;
+    resident.legRecordingRequested = true;
+    try {
+      const recording = await client.calls(residentCallSid).recordings.create({
+        recordingChannels: 'dual',
+        trim: 'do-not-trim',
+        recordingStatusCallback: `${base}/twilio/recording-status?resident=${residentCallSid}&leg=resident`,
+        recordingStatusCallbackMethod: 'POST',
+        recordingStatusCallbackEvent: ['in-progress', 'completed', 'absent'],
+      });
+      log(`RECORDING resident line started sid=${recording.sid} resident=${residentCallSid}`);
+      upsertRecording(residentCallSid, {
+        kind: 'resident', recording_sid: recording.sid, call_sid: residentCallSid, channels: 2,
+        status: recording.status || 'in-progress', started_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      log(`ERROR could not start recording the resident's line resident=${residentCallSid}: ${twilioError(err)}`);
+      const media = mediaFor(residentCallSid);
+      if (media) {
+        media.live_events.push({ leg: 'resident', technician: null, event: 'recording-error', at: new Date().toISOString(), detail: twilioError(err) });
+        persistMedia(residentCallSid);
+      }
+    }
+  }
+
+  // Twilio's post-call transcript (Conversational Intelligence) of one recording, if the
+  // account made one. Read only: the Intelligence service and its settings are not touched.
+  async function fetchIntelligence(recordingSid) {
+    const fetchedAt = new Date().toISOString();
+    const found = await client.intelligence.v2.transcripts.list({ sourceSid: recordingSid, limit: 20 });
+    if (!found.length) {
+      return { status: 'none', transcript_sid: null, service_sid: null, transcripts_found: 0, fetched_at: fetchedAt, error: null, sentences: [], operator_results: [] };
+    }
+    const pick = found.find((x) => x.status === 'completed') || found[0];
+    const result = {
+      status: pick.status, transcript_sid: pick.sid, service_sid: pick.serviceSid, transcripts_found: found.length,
+      fetched_at: fetchedAt, error: null, sentences: [], operator_results: [],
+    };
+    if (pick.status !== 'completed') return result;
+
+    const sentences = await client.intelligence.v2.transcripts(pick.sid).sentences.list({ redacted: false, limit: 1000 });
+    result.sentences = sentences.map((s) => ({
+      channel: s.mediaChannel,
+      text: s.transcript,
+      start: Number(s.startTime),
+      end: Number(s.endTime),
+      confidence: s.confidence === null || s.confidence === undefined ? null : Number(s.confidence),
+    }));
+    const operators = await client.intelligence.v2.transcripts(pick.sid).operatorResults.list({ redacted: false }).catch(() => []);
+    result.operator_results = operators.map((o) => ({
+      name: o.name,
+      type: o.operatorType,
+      result: o.jsonResults ?? o.textGenerationResults ?? o.predictedLabel ?? o.extractResults ?? null,
+    }));
+    return result;
+  }
+
+  function storeIntelligence(residentCallSid, recordingSid, result) {
+    const t = transfers.get(residentCallSid);
+    if (t && t.media) {
+      t.media.intelligence[recordingSid] = result;
+      return saveReport(t);
+    }
+    // After a restart the call is no longer in memory: update the saved file directly.
+    const stored = reports.get(residentCallSid);
+    if (!stored || !stored.twilio) return;
+    stored.twilio.intelligence = { ...(stored.twilio.intelligence || {}), [recordingSid]: result };
+    reports.save(stored);
+  }
+
+  const intelligenceFetches = new Map(); // resident CallSid -> fetch in progress
+
+  // Fetches Twilio's post-call transcript for every finished recording that does not
+  // have a completed one yet. Called when a report page is opened.
+  function refreshTwilioTranscripts(residentCallSid) {
+    if (!client.intelligence) return Promise.resolve();
+    const stored = reports.get(residentCallSid);
+    if (!stored || !stored.twilio) return Promise.resolve();
+    const done = stored.twilio.intelligence || {};
+    const todo = (stored.twilio.recordings || [])
+      .filter((r) => r.status === 'completed' && RECORDING_SID_RE.test(r.recording_sid || ''))
+      .filter((r) => !done[r.recording_sid] || done[r.recording_sid].status !== 'completed');
+    if (!todo.length) return Promise.resolve();
+    if (intelligenceFetches.has(residentCallSid)) return intelligenceFetches.get(residentCallSid);
+
+    const fetching = (async () => {
+      for (const recording of todo) {
+        let result;
+        try {
+          result = await fetchIntelligence(recording.recording_sid);
+          log(`TWILIO-TRANSCRIPT ${recording.kind}${recording.technician ? ` ${recording.technician}` : ''} recording=${recording.recording_sid} ${result.status}: ${result.sentences.length} sentence(s)`);
+        } catch (err) {
+          log(`ERROR could not fetch Twilio's transcript of recording=${recording.recording_sid}: ${twilioError(err)}`);
+          result = { ...(done[recording.recording_sid] || { sentences: [], operator_results: [] }), status: 'unavailable', error: twilioError(err), fetched_at: new Date().toISOString() };
+        }
+        storeIntelligence(residentCallSid, recording.recording_sid, result);
+      }
+    })().finally(() => intelligenceFetches.delete(residentCallSid));
+    intelligenceFetches.set(residentCallSid, fetching);
+    return fetching;
+  }
+
   // The transfer is over, one way or another: store the result and print the one-line summary.
   function finish(t, result, at = Date.now()) {
     if (t.result) return;
@@ -251,14 +428,35 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       pendingHandover: null, //            set while waiting for Iris to finish a sentence (handOver)
       handoverTimer: null,
       handoverGraceTimer: null,
+      legRecordingRequested: false, //     the resident's own line is being recorded
+      // Twilio recordings and transcripts for this call. Collected from the first second,
+      // before any report exists; the transfer report shares this object (t.media).
+      media: newMedia(),
+    };
+  }
+
+  function newMedia() {
+    return {
+      settings: {
+        record_legs: recordLegs,
+        live_transcription: liveTranscription,
+        live_transcription_iris_leg: liveTranscriptionIrisLeg,
+      },
+      recordings: [], //      [{ kind, technician, recording_sid, call_sid, channels, status, ... }]
+      live_transcript: [], // [{ leg, technician, track, text, confidence, at }]
+      live_events: [], //     [{ leg, technician, event, at, detail }] started / stopped / error
+      intelligence: {}, //    recording SID -> Twilio's post-call transcript of that recording
     };
   }
 
   // The shared room. Only the resident ends it by leaving: if the technician hangs up
   // the resident is still with Iris, and if Iris drops the resident and technician carry on.
-  function conferenceTwiml(residentCallSid, { say, endConferenceOnExit }) {
+  // liveResident: also start the live transcription of the resident's line (the
+  // technician's is started earlier, before their brief, see /tech/answered).
+  function conferenceTwiml(residentCallSid, { say, endConferenceOnExit, liveResident = false }) {
     const callback = `${base}/conference/status?resident=${residentCallSid}`;
     const vr = new VoiceResponse();
+    if (liveResident && liveTranscription) addLiveTranscription(vr, residentCallSid, 'resident');
     if (say) vr.say(say);
     vr.dial().conference(
       {
@@ -346,7 +544,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const outbound = resident.direction === 'outbound';
     const { firstMessage } = resident.agent;
     try {
-      const xml = await registerCall({
+      let xml = await registerCall({
         fromNumber: outbound ? resident.twilioNumber : resident.number,
         toNumber: outbound ? resident.number : resident.twilioNumber,
         direction: resident.direction,
@@ -355,6 +553,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         firstMessage,
       });
       log(`REGISTER-CALL ok resident=${residentCallSid} direction=${resident.direction}${firstMessage ? ' with first-message override' : ''}`);
+      if (liveTranscriptionIrisLeg) xml = withIrisLiveTranscription(xml, residentCallSid, resident.agent.joins);
       res.type('text/xml').send(xml);
     } catch (err) {
       log(`ERROR register-call failed resident=${residentCallSid}: ${err.message}`);
@@ -742,6 +941,16 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         statusCallback: `${base}/tech/status?${query}`,
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+        // The technician's own line, from the moment they pick up: the brief, "Press 1",
+        // then their part of the call. Their voice on one channel, what they hear on the other.
+        ...(recordLegs ? {
+          record: true,
+          recordingChannels: 'dual',
+          trim: 'do-not-trim',
+          recordingStatusCallback: `${base}/twilio/recording-status?${query}&leg=technician`,
+          recordingStatusCallbackMethod: 'POST',
+          recordingStatusCallbackEvent: ['in-progress', 'completed', 'absent'],
+        } : {}),
       });
       tech.callSid = call.sid;
       log(`DIAL tech#${i} ${tech.number} call=${call.sid} resident=${t.residentCallSid}`);
@@ -883,7 +1092,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   // as Twilio reports the resident has joined (see /conference/status).
   function residentIntoRoom(res, residentCallSid) {
     log(`RESIDENT resident=${residentCallSid} -> ${roomName(residentCallSid)}, Iris will be added`);
-    sendTwiml(res, conferenceTwiml(residentCallSid, { endConferenceOnExit: true }));
+    sendTwiml(res, conferenceTwiml(residentCallSid, { endConferenceOnExit: true, liveResident: true }));
   }
 
   app.post('/twilio/outbound-answer', twilioHook, (req, res) => {
@@ -969,6 +1178,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       messages: [], //         [{ text, at }] messages Iris took with the take_message tool
       progress: null, //       latest troubleshooting progress (update_transfer), used in the brief
       progressUpdates: [], //  [{ text, at, used }] every progress sentence Iris sent
+      media: resident.media, // Twilio recordings and transcripts, collected since the call started
     };
     transfers.set(callSid, t);
     timing(t, 'tool_call');
@@ -1127,6 +1337,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
     const query = `resident=${t.residentCallSid}&tech=${i}`;
     const vr = new VoiceResponse();
+    // Started once, before the brief, and kept for the rest of the technician's call.
+    if (attempt === 1 && liveTranscription) addLiveTranscription(vr, t.residentCallSid, 'technician', { tech: i, name: `technician-${i + 1}` });
     const gather = vr.gather({ numDigits: 1, timeout: 6, action: `${base}/tech/accept?${query}`, method: 'POST' });
     // Built now, when the technician answers, so it carries the latest troubleshooting
     // progress Iris reported with update_transfer (decision.md D24).
@@ -1265,6 +1477,16 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
     if (body.RecordingSid) {
       log(`RECORDING ${body.RecordingStatus} sid=${body.RecordingSid} conference=${body.ConferenceSid} duration=${body.RecordingDuration}s url=${body.RecordingUrl}`);
+      upsertRecording(residentCallSid, {
+        kind: 'room',
+        recording_sid: body.RecordingSid,
+        conference_sid: body.ConferenceSid || null,
+        channels: Number(body.RecordingChannels) || 1,
+        status: body.RecordingStatus || null,
+        duration_seconds: body.RecordingDuration ? Number(body.RecordingDuration) : null,
+        started_at: isoFromTwilio(body.RecordingStartTime),
+        error: body.ErrorCode && body.ErrorCode !== '0' ? `Twilio error ${body.ErrorCode}` : null,
+      });
       return;
     }
     if (!resident) return;
@@ -1278,6 +1500,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
       if (who === 'resident') {
         addAgent(residentCallSid);
+        startResidentRecording(residentCallSid);
       } else if (who === 'agent') {
         resident.agent.state = 'in';
         resident.agent.callSid = body.CallSid;
@@ -1333,6 +1556,71 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     }
   });
 
+  // ---------------------------------------------------------------- Twilio media callbacks
+
+  // Status of the resident-line and technician-line recordings (the room recording reports
+  // to /conference/status instead).
+  app.post('/twilio/recording-status', twilioHook, (req, res) => {
+    res.sendStatus(204);
+    const residentCallSid = req.query.resident;
+    const body = req.body;
+    if (!body.RecordingSid) return;
+    const isTech = req.query.leg === 'technician';
+    const technician = isTech ? Number.parseInt(req.query.tech, 10) + 1 : null;
+    upsertRecording(residentCallSid, {
+      kind: isTech ? 'technician' : 'resident',
+      technician,
+      recording_sid: body.RecordingSid,
+      call_sid: body.CallSid || null,
+      channels: Number(body.RecordingChannels) || null,
+      status: body.RecordingStatus || null,
+      duration_seconds: body.RecordingDuration ? Number(body.RecordingDuration) : null,
+      started_at: isoFromTwilio(body.RecordingStartTime),
+      error: body.ErrorCode && body.ErrorCode !== '0' ? `Twilio error ${body.ErrorCode}` : null,
+    });
+    log(`RECORDING ${legName(isTech ? 'technician' : 'resident', technician)} line ${body.RecordingStatus} sid=${body.RecordingSid} duration=${body.RecordingDuration || '-'}s resident=${residentCallSid}`);
+  });
+
+  // Live transcription callbacks: one per finished sentence on one track of one leg,
+  // plus started / stopped / error events.
+  app.post('/twilio/live-transcription', twilioHook, (req, res) => {
+    res.sendStatus(204);
+    const residentCallSid = req.query.resident;
+    const media = mediaFor(residentCallSid);
+    if (!media) return;
+    const body = req.body;
+    const leg = ['resident', 'technician', 'iris'].includes(req.query.leg) ? req.query.leg : 'unknown';
+    const technician = leg === 'technician' ? Number.parseInt(req.query.tech, 10) + 1 : null;
+    const event = body.TranscriptionEvent;
+
+    if (event === 'transcription-content') {
+      if (body.Final === 'false') return; // partial results are not requested, but just in case
+      let text = '';
+      let confidence = null;
+      try {
+        const data = JSON.parse(body.TranscriptionData || '{}');
+        text = String(data.transcript || '');
+        confidence = data.confidence === undefined ? null : Number(data.confidence);
+      } catch {
+        text = String(body.TranscriptionData || '');
+      }
+      text = text.trim();
+      if (!text) return;
+      const at = Date.parse(body.Timestamp || '');
+      media.live_transcript.push({
+        leg, technician, track: body.Track || null, text, confidence,
+        at: new Date(Number.isFinite(at) ? at : Date.now()).toISOString(),
+        call_sid: body.CallSid || null,
+      });
+      log(`LIVE ${legName(leg, technician)} ${body.Track || '?'}: ${JSON.stringify(text)}`);
+    } else if (event) {
+      const detail = body.TranscriptionError || body.TranscriptionErrorCode || null;
+      media.live_events.push({ leg, technician, event, at: new Date().toISOString(), detail, call_sid: body.CallSid || null });
+      log(`LIVE ${legName(leg, technician)} ${event}${detail ? `: ${detail}` : ''}`);
+    }
+    persistMedia(residentCallSid);
+  });
+
   // ---------------------------------------------------------------- reports
 
   app.get('/reports', localOnly, (req, res) => {
@@ -1346,12 +1634,26 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     // Opening the page fetches the latest transcript (until it is final), but never
     // keeps the browser waiting long if ElevenLabs is slow.
     await Promise.race([
-      refreshTranscript(req.params.sid),
+      Promise.all([refreshTranscript(req.params.sid), refreshTwilioTranscripts(req.params.sid)]),
       new Promise((resolve) => { setTimeout(resolve, 9000).unref(); }),
     ]);
     const report = reports.get(req.params.sid);
     if (req.query.format === 'json') return res.json(report);
     res.type('html').send(renderDetail(report));
+  }));
+
+  // Plays one of this call's Twilio recordings in the report page. The server downloads it
+  // from Twilio with the account credentials, so the browser never needs them.
+  app.get('/reports/:sid/recordings/:file', localOnly, wrap(async (req, res) => {
+    const report = reports.get(req.params.sid);
+    const recordingSid = String(req.params.file).replace(/\.mp3$/i, '');
+    const known = report && report.twilio && (report.twilio.recordings || []).some((r) => r.recording_sid === recordingSid);
+    if (!RECORDING_SID_RE.test(recordingSid) || !known) return res.status(404).send('No such recording for this call.');
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${config.twilioAccountSid}/Recordings/${recordingSid}.mp3`;
+    const auth = Buffer.from(`${config.twilioAccountSid}:${config.twilioAuthToken}`).toString('base64');
+    const response = await fetchImpl(url, { headers: { Authorization: `Basic ${auth}` } });
+    if (!response.ok) return res.status(502).send(`Twilio answered HTTP ${response.status} for recording ${recordingSid}.`);
+    res.type('audio/mpeg').send(Buffer.from(await response.arrayBuffer()));
   }));
 
   // eslint-disable-next-line no-unused-vars

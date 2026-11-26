@@ -31,9 +31,12 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 // holdDelayMs: null = no hold music (most tests), a number = music starts that long after the tool call.
 // holdResumeMs: how long after a "technician did not pick up" update the music comes back.
-async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0, handoverGraceMs = 0 } = {}) {
+// recordLegs / liveTranscription / liveTranscriptionIrisLeg: the Twilio recordings and live
+// transcripts merged from full-call-recording. Off unless a test turns them on.
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0, handoverGraceMs = 0, recordLegs = false, liveTranscription = false, liveTranscriptionIrisLeg = false } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
+  const legRecordings = []; //  calls(sid).recordings.create(...) -> recording the resident's own line
   const agentLegs = []; //      conferences(sid).participants.create(...) -> Iris joining
   const roomUpdates = []; //    conferences(sid).update(...) -> announcements, ending the room
   const registered = []; //     register-call requests to ElevenLabs
@@ -64,6 +67,12 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
       }
       const ignored = options.status === 'canceled' && answeredMeanwhile.has(sid);
       return { sid, status: ignored ? 'in-progress' : options.status || 'in-progress' };
+    },
+    recordings: {
+      create: async (options) => {
+        legRecordings.push({ callSid: sid, ...options });
+        return { sid: `RE${String(legRecordings.length).padStart(32, '0')}`, status: 'in-progress' };
+      },
     },
   });
   calls.create = async (options) => {
@@ -129,6 +138,9 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
     updateFallbackMs,
     handoverGraceMs,
     holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
+    recordLegs,
+    liveTranscription,
+    liveTranscriptionIrisLeg,
     transcriptRetryMs: [5],
     reportsDir: path.join(tmp, 'reports'),
     publicDir: path.join(tmp, 'public'),
@@ -245,7 +257,7 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
   };
 
   return {
-    config, state, created, updates, agentLegs, roomUpdates, mutes, holds, agentCues, roomActions, registered, logs, failUpdatesFor, answeredMeanwhile, flags, elevenLabs,
+    config, state, created, updates, legRecordings, agentLegs, roomUpdates, mutes, holds, agentCues, roomActions, registered, logs, failUpdatesFor, answeredMeanwhile, flags, elevenLabs,
     hook, json, get, room, avaJoins, avaLeaves, residentIsWithAva, residentAsksForTransfer, tech, techAcceptsAndJoins,
     techCalls, endedWith, announcements, roomEnded, transfer, outcomes, report, close,
   };
@@ -1118,6 +1130,16 @@ test('config: DIAL_MODE=parallel only warns, and HOLD_MUSIC_RESUME_SEC is read a
   assert.throws(() => loadConfig({ ...env, HOLD_MUSIC_RESUME_SEC: 'soon' }), /HOLD_MUSIC_RESUME_SEC must be a number/);
 });
 
+// The report page has one tab panel per view (merged transcript, ElevenLabs transcript,
+// Twilio transcripts, ...) and the same lines can appear in more than one. Checks on one
+// view look only inside its panel.
+function panelOf(html, id) {
+  const start = html.indexOf(`<div class="panel" id="panel-${id}">`);
+  assert.ok(start >= 0, `the page has a "${id}" panel`);
+  const end = html.indexOf('<div class="panel" id="panel-', start + 1);
+  return html.slice(start, end < 0 ? undefined : end);
+}
+
 test('transcript: with several mute periods, only Iris lines inside a period are marked "muted, not heard"', () => {
   const { renderDetail } = require('../src/reports');
   const at = (s) => new Date(Date.UTC(2026, 10, 25, 10, 0, s)).toISOString();
@@ -1152,13 +1174,16 @@ test('transcript: with several mute periods, only Iris lines inside a period are
     },
   };
   const page = renderDetail(report);
-  const label = (text) => page.match(new RegExp(`<td>([^<]+)</td><td class="text">${text.replace(/[.,]/g, '\\$&')}`))[1];
+  const el = panelOf(page, 'elevenlabs');
+  const label = (text) => el.match(new RegExp(`<td>([^<]+)</td><td class="text">${text.replace(/[.,]/g, '\\$&')}`))[1];
   assert.equal(label('Please hold while I find a technician.'), 'Iris', 'before the first hold');
   assert.equal(label('Still looking, hang on.'), 'Iris (muted, not heard)', 'during the first hold');
   assert.equal(label('Technician 1 did not pick up, I am trying the next one now.'), 'Iris', 'the update itself was heard');
   assert.equal(label('Kofi, the resident is in unit 4B.'), 'Iris (muted, not heard)', 'during the second mute');
   assert.ok(page.includes('Technician 1 (+15550000001) did not take the call: Iris cued to tell the resident'));
-  assert.equal((page.match(/Resident put on hold with music/g) || []).length, 2);
+  // Both hold periods, once each, in the ElevenLabs view and in the merged view.
+  assert.equal((el.match(/Resident put on hold with music/g) || []).length, 2);
+  assert.equal((panelOf(page, 'merged').match(/Resident put on hold with music/g) || []).length, 2);
   assert.match(page, /<th>Resident told<\/th>/);
 });
 
@@ -1248,9 +1273,10 @@ test('transcript: fetched from ElevenLabs after the call and shown on the report
   assert.equal(transcript.conversations[0].entries.length, 6, '5 spoken lines and 1 tool call');
   assert.ok(s.logs.some((line) => line.includes('TRANSCRIPT') && line.includes('final')));
 
-  const detail = (await s.get(`/reports/${RESIDENT}`)).text;
-  assert.ok(detail.includes('<h2>Transcript</h2>'));
-  assert.ok(detail.includes('ElevenLabs summary:</strong> Resident reported a leak'));
+  const page = (await s.get(`/reports/${RESIDENT}`)).text;
+  assert.ok(page.includes('ElevenLabs summary:</strong> Resident reported a leak'));
+  const detail = panelOf(page, 'elevenlabs');
+  assert.ok(detail.includes('<h2>ElevenLabs transcript</h2>'));
   const order = [
     'My kitchen sink is leaking.',
     'called request_transfer',
@@ -1282,7 +1308,7 @@ test('transcript: speakers and key moments still line up when the ElevenLabs clo
 
   // Seen on a real call: ElevenLabs reported the conversation starting 73 seconds "late".
   s.elevenLabs.details = [conversationFor(s.report(), { clockSkewSeconds: 73 })];
-  const detail = (await s.get(`/reports/${RESIDENT}`)).text;
+  const detail = panelOf((await s.get(`/reports/${RESIDENT}`)).text, 'elevenlabs');
 
   const order = [
     'My kitchen sink is leaking.',
@@ -1954,4 +1980,93 @@ test('handover grace: default is 1.5 s', () => {
   const env = { TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'x', TWILIO_PHONE_NUMBER: TWILIO_NUMBER, ELEVENLABS_API_KEY: 'x', ELEVENLABS_AGENT_ID: 'agent_x', TECH_NUMBERS: '+15550000001', PUBLIC_BASE_URL: PUBLIC, TOOL_SECRET: 'x', TWILIO_AGENT_APP_SID: APP_SID };
   assert.equal(loadConfig(env).handoverGraceMs, 1500);
   assert.equal(loadConfig({ ...env, HANDOVER_GRACE_MS: '0' }).handoverGraceMs, 0);
+});
+
+// ---------------------------------------------------------------- recordings (merged from full-call-recording)
+
+test('recordings: with recording and live transcripts on, the troubleshooting flow is unchanged and every line is captured', async (t) => {
+  const s = await setup({ recordLegs: true, liveTranscription: true, liveTranscriptionIrisLeg: true, handoverMaxWaitMs: 2000 });
+  t.after(s.close);
+
+  // The resident's line: live transcript from the first TwiML, own recording once in the room.
+  const inbound = await s.hook('/twilio/inbound', { CallSid: RESIDENT, From: RESIDENT_NUMBER, To: TWILIO_NUMBER, Direction: 'inbound' });
+  assert.match(inbound.text, /<Start><Transcription[^>]*name="resident"[^>]*track="both_tracks"/);
+  assert.match(inbound.text, /<Dial><Conference[^>]*>room-/, 'still goes into the room');
+  await s.room('participant-join', { CallSid: RESIDENT });
+  assert.equal(s.legRecordings.length, 1);
+  assert.equal(s.legRecordings[0].callSid, RESIDENT);
+  assert.equal(s.legRecordings[0].recordingChannels, 'dual');
+
+  // Iris's leg: the live transcription goes in front of the ElevenLabs stream.
+  const agent = await s.avaJoins();
+  assert.match(agent.text, /<Response><Start><Transcription[^>]*name="iris-1"[^>]*\/><\/Start><Connect><Stream/);
+
+  await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'Leak under the kitchen sink in unit 4B.' });
+  await tick();
+  assert.deepEqual(s.holds, [], 'no hold music on this branch');
+
+  // One at a time, still: technician 1 does not answer, then technician 2 is called.
+  assert.equal(s.techCalls().length, 1);
+  assert.equal(s.techCalls()[0].record, true, "the technician's own line is recorded");
+  assert.equal(s.techCalls()[0].recordingChannels, 'dual');
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.equal(s.techCalls().length, 2);
+
+  // Technician 2 answers: live transcript starts before the brief, the brief still carries the summary.
+  await s.hook(`/tech/status?resident=${RESIDENT}&tech=1`, { CallSid: s.tech(1).sid(), CallStatus: 'in-progress' });
+  const brief = await s.hook(`/tech/answered?resident=${RESIDENT}&tech=1`, { CallSid: s.tech(1).sid(), CallStatus: 'in-progress' });
+  assert.match(brief.text, /<Start><Transcription[^>]*name="technician-2"[^>]*\/><\/Start>[\s\S]*<Gather/);
+  assert.match(brief.text, /Leak under the kitchen sink in unit 4B\./);
+
+  // Handover: Iris is mid-sentence, so she is muted only once she finishes.
+  const iris = s.agentLegs[0].callSid;
+  await s.room('participant-speech-start', { CallSid: iris });
+  await s.tech(1).press('1');
+  await tick();
+  await s.tech(1).joins();
+  await tick();
+  assert.deepEqual(s.mutes, [], 'not muted mid-sentence');
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await tick();
+  assert.equal(s.mutes.length, 1);
+  assert.equal(s.mutes[0].callSid, iris);
+
+  // Twilio reports the recordings and live transcript lines.
+  await s.hook(`/twilio/recording-status?resident=${RESIDENT}&leg=resident`, { CallSid: RESIDENT, RecordingSid: `RE${'0'.repeat(31)}1`, RecordingStatus: 'completed', RecordingDuration: '61', RecordingChannels: '2' });
+  await s.hook(`/twilio/recording-status?resident=${RESIDENT}&tech=1&leg=technician`, { CallSid: s.tech(1).sid(), RecordingSid: `RE${'9'.repeat(32)}`, RecordingStatus: 'completed', RecordingDuration: '30', RecordingChannels: '2' });
+  await s.room('recording', { RecordingSid: `RE${'8'.repeat(32)}`, RecordingStatus: 'completed', RecordingDuration: '62', RecordingChannels: '1' });
+  await s.hook(`/twilio/live-transcription?resident=${RESIDENT}&leg=resident`, {
+    TranscriptionEvent: 'transcription-content', Track: 'inbound_track', Final: 'true', CallSid: RESIDENT,
+    TranscriptionData: JSON.stringify({ transcript: 'My kitchen sink is leaking.', confidence: 0.93 }),
+  });
+  await tick();
+
+  const report = s.report();
+  assert.equal(report.result, 'connected');
+  assert.equal(report.sequence.one_at_a_time, true, 'the sequence proof is still in the report');
+  assert.ok(report.technicians[1].briefing, 'the brief is still in the report');
+  const kinds = report.twilio.recordings.map((r) => `${r.kind}${r.technician ? ` ${r.technician}` : ''}:${r.status}`).sort();
+  assert.deepEqual(kinds, ['resident:completed', 'room:completed', 'technician 2:completed']);
+  assert.deepEqual(report.twilio.live_transcript.map((l) => [l.leg, l.track, l.text]), [['resident', 'inbound_track', 'My kitchen sink is leaking.']]);
+  assert.deepEqual(report.twilio.settings, { record_legs: true, live_transcription: true, live_transcription_iris_leg: true });
+
+  const page = (await s.get(`/reports/${RESIDENT}`)).text;
+  for (const id of ['merged', 'elevenlabs', 'twilio']) panelOf(page, id);
+  assert.match(page, /<h2>Call sequence<\/h2>/);
+});
+
+test('recordings: with everything off, no line recording or live transcript is requested', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  const inbound = await s.hook('/twilio/inbound', { CallSid: RESIDENT, From: RESIDENT_NUMBER, To: TWILIO_NUMBER, Direction: 'inbound' });
+  assert.doesNotMatch(inbound.text, /<Transcription/);
+  await s.room('participant-join', { CallSid: RESIDENT });
+  const agent = await s.avaJoins();
+  assert.doesNotMatch(agent.text, /<Transcription/);
+  await s.json('/tool/request-transfer', { call_sid: RESIDENT, summary: 'Leak.' });
+  await tick();
+  assert.equal(s.legRecordings.length, 0);
+  assert.equal(s.techCalls()[0].record, undefined);
+  assert.match(inbound.text, /record="record-from-start"/, 'the room recording is always made');
 });

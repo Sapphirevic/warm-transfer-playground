@@ -4,6 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { buildMergedTranscript, elevenLabsLines } = require('./merge');
 
 const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
 
@@ -93,6 +94,9 @@ function buildReport(t) {
     })),
     // Filled in from ElevenLabs after the call (see buildTranscript).
     transcript: t.transcript || null,
+    // Twilio's side: recordings of the room and of each person's own line, live transcripts
+    // of each line, and Twilio's post-call transcripts of the recordings (see app.js "Twilio media").
+    twilio: t.media ? JSON.parse(JSON.stringify(t.media)) : null,
     technicians: t.techs.map((tech) => ({
       number: tech.number,
       call_sid: tech.callSid,
@@ -249,6 +253,18 @@ function page(title, body) {
   body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; color: #1a1a1a; background: #fff; }
   h1 { font-size: 20px; }
   h2 { font-size: 16px; margin-top: 28px; }
+  h3 { font-size: 15px; margin-top: 22px; }
+  h4 { font-size: 14px; margin: 16px 0 6px; }
+  audio { width: 260px; }
+  .tabs { margin-top: 24px; }
+  .tabs > input { position: absolute; opacity: 0; pointer-events: none; }
+  .tabbar { border-bottom: 1px solid #ccc; }
+  .tabbar label { display: inline-block; padding: 6px 14px; margin: 0 2px -1px 0; border: 1px solid #ccc; border-radius: 4px 4px 0 0; background: #f2f2f2; cursor: pointer; }
+  .tabs > .panel { display: none; }
+  .tabs > .panel > h2:first-child { margin-top: 16px; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; padding: 4px 0; }
+  tr.uncertain td { color: #666; }
   .wrap { overflow-x: auto; }
   table { border-collapse: collapse; }
   th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: top; white-space: nowrap; }
@@ -308,9 +324,6 @@ ${rows.join('\n')}
 </table></div>`}`);
 }
 
-// ElevenLabs' own tools. They are not the transfer request, so they cannot be used to line up the clocks.
-const SYSTEM_TOOLS = /called (skip_turn|end_call|language_detection|transfer_to_number|transfer_to_agent|play_keypad_touch_tone|voicemail_detection)\b/;
-
 function transcriptLineCount(r) {
   return ((r.transcript && r.transcript.conversations) || []).reduce((n, c) => n + c.entries.filter((e) => e.role !== 'tool').length, 0);
 }
@@ -319,7 +332,7 @@ function transcriptLineCount(r) {
 function renderTranscript(r) {
   const transcript = r.transcript;
   if (!transcript) {
-    return '<h2>Transcript</h2>\n<p>Not fetched yet. It is collected from ElevenLabs shortly after the call ends. Reload this page to try again.</p>';
+    return '<h2>ElevenLabs transcript</h2>\n<p>Not fetched yet. It is collected from ElevenLabs shortly after the call ends. Reload this page to try again.</p>';
   }
 
   const notes = [];
@@ -327,26 +340,8 @@ function renderTranscript(r) {
   if (transcript.status === 'pending') notes.push('ElevenLabs has no conversation for this call yet. Reload this page in a few seconds.');
   if (transcript.status === 'unavailable') notes.push(`Could not fetch the transcript from ElevenLabs: ${esc(transcript.error)}`);
 
-  // ElevenLabs' clock and this server's clock can be a minute or more apart, so its
-  // timestamps cannot be compared with ours as they are. One moment is known on both
-  // clocks: when Iris called the transfer tool. ElevenLabs says how many seconds into the
-  // conversation that was, and the report's started_at is when the server received it.
-  // Every line is placed relative to that.
-  const first = transcript.conversations[0];
-  const toolCall = first && first.entries.find((e) => e.role === 'tool' && !SYSTEM_TOOLS.test(e.text));
-  const clockOffsetMs = toolCall && r.started_at && first.started_at
-    ? Date.parse(r.started_at) - toolCall.seconds * 1000 - Date.parse(first.started_at)
-    : 0;
-  const onOurClock = (conversation, entry) => {
-    const startMs = Date.parse(conversation.started_at);
-    return Number.isFinite(startMs) ? new Date(startMs + clockOffsetMs + entry.seconds * 1000).toISOString() : entry.at;
-  };
-
-  const rows = [];
-  transcript.conversations.forEach((conversation, index) => {
-    if (index > 0) rows.push({ at: onOurClock(conversation, { seconds: 0 }), role: 'marker', text: 'Iris rejoined the call (new ElevenLabs conversation)' });
-    rows.push(...conversation.entries.map((entry) => ({ ...entry, at: onOurClock(conversation, entry) })));
-  });
+  // ElevenLabs' lines placed on the server's clock (see elevenLabsLines in merge.js).
+  const rows = elevenLabsLines(r);
   rows.push({ at: r.started_at, role: 'marker', text: 'Iris asked for a technician (request_transfer)' });
   const joinedAt = r.result === 'connected' ? r.finished_at : null;
   if (r.result && r.finished_at) {
@@ -423,7 +418,7 @@ function renderTranscript(r) {
   const summaries = transcript.conversations.filter((c) => c.summary).map((c) => `<p><strong>ElevenLabs summary:</strong> ${esc(c.summary)}</p>`);
   const lines = transcriptLineCount(r);
 
-  return `<h2>Transcript</h2>
+  return `<h2>ElevenLabs transcript</h2>
 ${notes.map((note) => `<p class="note">${note}</p>`).join('\n')}
 ${summaries.join('\n')}
 ${lines === 0 && notes.length === 0 ? '<p>ElevenLabs returned no spoken lines for this call.</p>' : ''}
@@ -432,6 +427,294 @@ ${lines === 0 ? '' : `<p>Times are UTC. ${r.transfer_style ? 'After the technici
 <tr><th>Time</th><th>Speaker</th><th>Said</th></tr>
 ${body.join('\n')}
 </table></div>`}`;
+}
+
+// ---------------------------------------------------------------- Twilio section
+
+// Server lines that can show up in a live transcript. The room announcement is heard by
+// everyone; the cues are played to Iris's leg only.
+const ROOM_JOINED_LINE = /a technician has joined the call/i;
+const CUE_TO_IRIS_LINE = /technician \w+ did not pick up|no technician is available right now/i;
+
+const recordingRank = (rec) => ({ room: 0, resident: 1, technician: 2 })[rec.kind] ?? 3;
+
+function recordingTitle(rec) {
+  if (rec.kind === 'room') return 'Room (the whole conference)';
+  if (rec.kind === 'resident') return "Resident's line";
+  if (rec.kind === 'technician') return `Technician ${rec.technician}'s line`;
+  return 'Recording';
+}
+
+function recordingContents(rec) {
+  if (rec.kind === 'room') {
+    return 'Everything said in the room, mixed into one channel. No hold music (only the resident hears it) and no technician brief (that is on the technician\'s own line).';
+  }
+  if (rec.kind === 'resident') {
+    return 'The resident\'s voice on one channel, and everything the resident heard on the other: Iris, the hold music, the updates and the technician.';
+  }
+  if (rec.kind === 'technician') {
+    return 'The technician\'s voice on one channel, and everything they heard on the other: the brief and "Press 1", then the resident once they joined.';
+  }
+  return '';
+}
+
+const clock = (isoString) => (isoString ? esc(isoString.slice(11, 19)) : '-');
+const mmss = (secondsValue) => {
+  if (!Number.isFinite(secondsValue)) return '-';
+  const whole = Math.floor(secondsValue);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+};
+const percent = (value) => (value === null || value === undefined || !Number.isFinite(Number(value)) ? '-' : `${Math.round(Number(value) * 100)}%`);
+
+// Who said a live-transcript line. The "inbound" track is the person on that line, so
+// it is certain. The "outbound" track is everything that person hears, so it is named
+// from the call's own timeline (on hold, technician in the room, Iris muted).
+function liveSpeaker(r, row) {
+  const winner = (r.technicians || []).find((tech) => tech.outcome === 'accepted');
+  const joinedAt = r.result === 'connected' ? r.finished_at : null;
+  const leftAt = winner ? winner.line_closed_at : null;
+  const techInRoom = (at) => Boolean(joinedAt && at >= joinedAt && (!leftAt || at < leftAt));
+  const within = (periods, at) => (periods || []).some((p) => at >= p.from && (!p.to || at < p.to));
+  const inbound = row.track === 'inbound_track';
+  const outbound = row.track === 'outbound_track';
+
+  if (row.leg === 'resident') {
+    if (inbound) return 'Resident';
+    if (!outbound) return 'Unknown track';
+    if (ROOM_JOINED_LINE.test(row.text)) return 'Room announcement (Twilio)';
+    if (within(r.hold_periods, row.at)) return 'Hold music';
+    return techInRoom(row.at) ? 'Technician' : 'Iris';
+  }
+  if (row.leg === 'technician') {
+    if (inbound) return `Technician ${row.technician}`;
+    if (!outbound) return 'Unknown track';
+    if (ROOM_JOINED_LINE.test(row.text)) return 'Room announcement (Twilio)';
+    const isWinner = winner && (r.technicians || []).indexOf(winner) + 1 === row.technician;
+    return isWinner && joinedAt && row.at >= joinedAt ? 'Resident' : 'Twilio (brief to the technician)';
+  }
+  if (row.leg === 'iris') {
+    if (outbound) return within(r.agent_mute_periods, row.at) ? 'Iris (muted, not heard)' : 'Iris';
+    if (!inbound) return 'Unknown track';
+    if (CUE_TO_IRIS_LINE.test(row.text)) return 'Cue to Iris only (resident did not hear it)';
+    if (ROOM_JOINED_LINE.test(row.text)) return 'Room announcement (Twilio)';
+    return techInRoom(row.at) ? 'Resident or technician' : 'Resident';
+  }
+  return 'Unknown line';
+}
+
+const TRACK_LABEL = {
+  resident: { inbound_track: 'inbound (resident\'s voice)', outbound_track: 'outbound (what the resident hears)' },
+  technician: { inbound_track: 'inbound (technician\'s voice)', outbound_track: 'outbound (what the technician hears)' },
+  iris: { inbound_track: 'inbound (what Iris hears)', outbound_track: 'outbound (Iris\'s voice)' },
+};
+
+function renderRecordings(r, tw) {
+  const recordings = [...(tw.recordings || [])].sort((a, b) => recordingRank(a) - recordingRank(b) || (a.technician || 0) - (b.technician || 0));
+  const rows = recordings.map((rec) => {
+    const audioUrl = `/reports/${esc(r.resident_call_sid)}/recordings/${esc(rec.recording_sid)}.mp3`;
+    const listen = rec.status === 'completed'
+      ? `<audio controls preload="none" src="${audioUrl}"></audio><br><a href="${audioUrl}" download>download .mp3</a>`
+      : '-';
+    return `<tr>
+  <td><strong>${esc(recordingTitle(rec))}</strong></td>
+  <td class="text">${esc(recordingContents(rec))}</td>
+  <td>${dash(rec.channels)}</td>
+  <td>${rec.duration_seconds === null || rec.duration_seconds === undefined ? '-' : `${esc(rec.duration_seconds)} s`}</td>
+  <td>${dash(rec.status)}${rec.error ? `<br><span class="note">${esc(rec.error)}</span>` : ''}</td>
+  <td>${listen}</td>
+  <td>${dash(rec.recording_sid)}</td>
+</tr>`;
+  });
+
+  // Recordings we expected but Twilio has not reported (yet).
+  const missing = [];
+  if (!recordings.some((rec) => rec.kind === 'room')) missing.push('Room recording: not reported by Twilio yet (it arrives a few seconds after the call ends).');
+  if (tw.settings && tw.settings.record_legs) {
+    if (!recordings.some((rec) => rec.kind === 'resident')) missing.push('Resident\'s line: not reported by Twilio yet.');
+    (r.technicians || []).forEach((tech, i) => {
+      if (tech.answered_at && !recordings.some((rec) => rec.kind === 'technician' && rec.technician === i + 1)) {
+        missing.push(`Technician ${i + 1}'s line: they answered, but Twilio has not reported a recording yet.`);
+      }
+    });
+  }
+
+  return `<h3>Recordings</h3>
+<p>Play them here; the server fetches the audio from Twilio. Two-channel recordings play in stereo: one person's voice in one ear, what they heard in the other.</p>
+${rows.length ? `<div class="wrap"><table>
+<tr><th>Recording</th><th>What is on it</th><th>Channels</th><th>Length</th><th>Status</th><th>Listen</th><th>Recording SID</th></tr>
+${rows.join('\n')}
+</table></div>` : '<p>No recordings reported by Twilio yet.</p>'}
+${missing.map((m) => `<p class="note">${esc(m)}</p>`).join('\n')}`;
+}
+
+// A collapsible block, so the Twilio tab shows one line per source until it is opened.
+const fold = (title, count, body, open = false) => `<details${open ? ' open' : ''}><summary><strong>${esc(title)}</strong>${count === null ? '' : ` <span class="note">(${esc(count)})</span>`}</summary>
+${body}
+</details>`;
+
+function renderLiveTranscripts(r, tw) {
+  const settings = tw.settings || {};
+  if (!settings.live_transcription) return '<h3>Live transcripts (Twilio Real-Time Transcription)</h3>\n<p>Live transcription was off for this call (LIVE_TRANSCRIPTION=false).</p>';
+
+  const lines = tw.live_transcript || [];
+  const events = tw.live_events || [];
+  const legs = [{ leg: 'resident', technician: null, title: 'Resident\'s line' }];
+  const techNumbers = new Set([...lines, ...events].filter((x) => x.leg === 'technician').map((x) => x.technician));
+  [...techNumbers].sort((a, b) => a - b).forEach((n) => legs.push({ leg: 'technician', technician: n, title: `Technician ${n}'s line` }));
+  if (settings.live_transcription_iris_leg) legs.push({ leg: 'iris', technician: null, title: 'Iris\'s line (the whole room, as Iris hears it)' });
+
+  const sections = legs.map(({ leg, technician, title }) => {
+    const same = (x) => x.leg === leg && (leg !== 'technician' || x.technician === technician);
+    const rows = [
+      ...lines.filter(same).map((row) => ({ kind: 'line', ...row })),
+      ...events.filter(same).map((event) => ({ kind: 'event', ...event })),
+    ].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    const count = rows.filter((row) => row.kind === 'line').length;
+    if (!rows.length) return fold(title, 'nothing received', '<p>Nothing received from Twilio for this line.</p>');
+    const body = rows.map((row) => (row.kind === 'event'
+      ? `<tr class="marker"><td>${clock(row.at)}</td><td colspan="4">${esc(row.event)}${row.detail ? `: ${esc(row.detail)}` : ''}</td></tr>`
+      : `<tr class="${row.track === 'inbound_track' ? '' : 'agent'}"><td>${clock(row.at)}</td><td>${esc((TRACK_LABEL[leg] || {})[row.track] || row.track || '-')}</td><td>${esc(liveSpeaker(r, row))}</td><td class="text">${esc(row.text)}</td><td>${percent(row.confidence)}</td></tr>`));
+    const errors = rows.filter((row) => row.kind === 'event' && /error/.test(row.event)).length;
+    return fold(title, `${count} line${count === 1 ? '' : 's'}${errors ? `, ${errors} error${errors === 1 ? '' : 's'}` : ''}`, `<div class="wrap"><table class="transcript">
+<tr><th>Time (UTC)</th><th>Track</th><th>Speaker</th><th>Said</th><th>Confidence</th></tr>
+${body.join('\n')}
+</table></div>`);
+  });
+
+  return `<h3>Live transcripts (Twilio Real-Time Transcription)</h3>
+<p>Made while the call was happening, one per phone line, in two tracks: <em>inbound</em> is the voice of the person on that line, so that speaker is certain; <em>outbound</em> is everything they hear, so that speaker is named from the call's timeline. On Iris's leg it is the other way round: inbound is the room she hears, outbound is her own voice.</p>
+${sections.join('\n')}`;
+}
+
+function renderOperatorResults(results) {
+  if (!results || !results.length) return '';
+  const items = results.map((op) => {
+    const value = op.result;
+    let shown;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const filled = Object.entries(value).filter(([, v]) => v !== '' && v !== null && v !== undefined);
+      shown = filled.length
+        ? `<ul>${filled.map(([k, v]) => `<li><strong>${esc(k)}:</strong> ${esc(typeof v === 'string' ? v : JSON.stringify(v))}</li>`).join('')}</ul>`
+        : '<span class="note">(empty: Twilio found nothing to fill in)</span>';
+    } else {
+      shown = value === null || value === undefined || value === '' ? '<span class="note">(empty)</span>' : esc(typeof value === 'string' ? value : JSON.stringify(value));
+    }
+    return `<p><strong>${esc(op.name)}</strong>: ${shown}</p>`;
+  });
+  return `<p><strong>Twilio summary</strong> (operators that the account's Intelligence service runs on every transcript):</p>\n${items.join('\n')}`;
+}
+
+// Channel 1 of a line's recording is the person on that line, channel 2 is what they
+// heard (confirmed on a real call, 2026-11-26).
+function channelLabel(rec, channel) {
+  if (rec.kind === 'room' || rec.channels === 1) return 'mixed (everyone)';
+  const owner = rec.kind === 'technician' ? `Technician ${rec.technician}` : 'Resident';
+  return Number(channel) === 1 ? owner : `heard by ${owner.toLowerCase()}`;
+}
+
+function renderIntelligence(r, tw) {
+  const recordings = [...(tw.recordings || [])].sort((a, b) => recordingRank(a) - recordingRank(b) || (a.technician || 0) - (b.technician || 0));
+  if (!recordings.length) return '<h3>Post-call transcripts (Twilio Conversational Intelligence)</h3>\n<p>No recordings yet, so nothing to transcribe.</p>';
+
+  const sections = recordings.map((rec) => {
+    const title = recordingTitle(rec);
+    const it = (tw.intelligence || {})[rec.recording_sid];
+    let status = null;
+    if (rec.status !== 'completed') status = 'The recording is not finished yet.';
+    else if (!it) status = 'Not fetched yet. Reload this page.';
+    else if (it.status === 'none') status = 'Twilio has no transcript of this recording yet. It usually appears within a minute of the call ending. Reload this page to check again.';
+    else if (it.status === 'unavailable') status = `Could not fetch Twilio's transcript: ${it.error}`;
+    else if (it.status !== 'completed') status = `Twilio is still transcribing this recording (status: ${it.status}). Reload this page in a few seconds.`;
+    if (status) return fold(title, 'not available yet', `<p class="note">${esc(status)}</p>`);
+
+    const mono = rec.kind === 'room' || rec.channels === 1;
+    const rows = (it.sentences || []).map((s) => `<tr><td>${mmss(s.start)}</td><td>${esc(channelLabel(rec, s.channel))}</td><td class="text">${esc(s.text)}</td><td>${percent(s.confidence)}</td></tr>`);
+    return fold(title, `${rows.length} sentence${rows.length === 1 ? '' : 's'}`, `<p>Recording ${esc(rec.recording_sid)}, transcript ${esc(it.transcript_sid)}${it.transcripts_found > 1 ? ` (Twilio made ${esc(it.transcripts_found)} transcripts of this recording; this is one of them)` : ''}.${mono ? ' One channel, so Twilio cannot tell the speakers apart.' : ' Channel 1 is the person on this line, channel 2 is what they heard.'}</p>
+${renderOperatorResults(it.operator_results)}
+${rows.length ? `<div class="wrap"><table class="transcript">
+<tr><th>Time in recording</th><th>Speaker (channel)</th><th>Said</th><th>Confidence</th></tr>
+${rows.join('\n')}
+</table></div>` : '<p>Twilio found no speech in this recording.</p>'}`);
+  });
+
+  return `<h3>Post-call transcripts (Twilio Conversational Intelligence)</h3>
+<p>The Twilio account transcribes every recording automatically after the call. Fetched from Twilio when this page is opened.</p>
+${sections.join('\n')}`;
+}
+
+const NO_TWILIO = '<p>This report was made before Twilio recordings were added to reports. The room recording is still in Twilio: look for the "RECORDING completed" line in the server log.</p>';
+
+function renderTwilioTranscripts(r) {
+  const tw = r.twilio;
+  if (!tw) return `<h2>Twilio transcripts</h2>\n${NO_TWILIO}`;
+  const s = tw.settings || {};
+  const onOff = (v) => (v ? 'on' : 'off');
+  return `<h2>Twilio transcripts</h2>
+<p>Settings for this call: separate recording of each line <strong>${onOff(s.record_legs)}</strong> · live transcription <strong>${onOff(s.live_transcription)}</strong> · live transcription of Iris's leg <strong>${onOff(s.live_transcription && s.live_transcription_iris_leg)}</strong>. Click a line to open it.</p>
+${renderLiveTranscripts(r, tw)}
+${renderIntelligence(r, tw)}`;
+}
+
+function renderRecordingsTab(r) {
+  if (!r.twilio) return `<h2>Recordings</h2>\n${NO_TWILIO}`;
+  return `<h2>Recordings</h2>\n${renderRecordings(r, r.twilio)}`;
+}
+
+// The Twilio summary of the call: from the resident's recording if there is one (it
+// covers the whole call), otherwise the room recording.
+function twilioSummary(r) {
+  const tw = r.twilio;
+  if (!tw) return null;
+  for (const kind of ['resident', 'room']) {
+    const rec = (tw.recordings || []).find((x) => x.kind === kind && x.status === 'completed');
+    const it = rec && (tw.intelligence || {})[rec.recording_sid];
+    const op = it && (it.operator_results || []).find((o) => o.name === 'MaintenanceSummary');
+    const text = op && op.result && typeof op.result === 'object' ? op.result.transcript_summary : op && op.result;
+    if (text) return String(text);
+  }
+  return null;
+}
+
+function renderMerged(r) {
+  const merged = buildMergedTranscript(r);
+  const lines = merged.rows.filter((row) => row.kind === 'line');
+  const elSummary = ((r.transcript && r.transcript.conversations) || []).map((c) => c.summary).find(Boolean);
+  const twSummary = twilioSummary(r);
+  const summaries = [
+    elSummary ? `<p><strong>ElevenLabs summary:</strong> ${esc(elSummary)}</p>` : '',
+    twSummary ? `<p><strong>Twilio summary:</strong> ${esc(twSummary)}</p>` : '',
+  ].join('\n');
+
+  if (!lines.length) {
+    return `<h2>Merged transcript</h2>
+${summaries}
+<p>Nothing to merge yet: no ElevenLabs transcript and no Twilio transcript for this call. Reload this page a minute after the call has ended.</p>`;
+  }
+
+  const rowClass = (row) => {
+    if (row.unheard) return 'unheard';
+    if (row.speaker.startsWith('Iris')) return 'agent';
+    if (row.speaker.startsWith('Twilio')) return 'announcement';
+    return row.uncertain ? 'uncertain' : '';
+  };
+  const body = merged.rows.map((row) => (row.kind === 'event'
+    ? `<tr class="marker"><td>${clock(row.at)}</td><td colspan="3">${esc(row.text)}</td></tr>`
+    : `<tr class="${rowClass(row)}"><td>${clock(row.at)}</td><td>${esc(row.speaker)}</td><td class="text">${esc(row.text)}${row.interrupted ? ' <em>(interrupted)</em>' : ''}</td><td${row.twilioText ? ` title="${esc(`Twilio heard: ${row.twilioText}`)}"` : ''}>${esc(row.textFrom)}${row.twilioText ? ' *' : ''}</td></tr>`));
+
+  const sources = merged.sources.length
+    ? `<ul>${merged.sources.map((x) => `<li><strong>${esc(x.speaker)}</strong>: ${esc(x.source)}</li>`).join('')}</ul>`
+    : '<p class="note">No Twilio line transcripts for this call, so the resident and technician cannot be told apart: those lines come from ElevenLabs and are named from the timeline only.</p>';
+
+  return `<h2>Merged transcript</h2>
+${summaries}
+<p>One transcript for the whole call. <strong>Who</strong> spoke comes from Twilio, which keeps each person's phone line separate. <strong>What</strong> they said comes from ElevenLabs where it heard the same words (its text is more accurate), otherwise from Twilio. Iris's lines are her own words from ElevenLabs, and Twilio's announcements and the yellow events come from the server's record. Times are UTC.</p>
+<div class="wrap"><table class="transcript">
+<tr><th>Time</th><th>Speaker</th><th>Said</th><th>Text from</th></tr>
+${body.join('\n')}
+</table></div>
+<p class="note">* Hover "Text from" to see what Twilio heard for that line. ${merged.stats.text_from_elevenlabs} of the people's lines use ElevenLabs' text.</p>
+<h3>Where each speaker comes from</h3>
+${sources}`;
 }
 
 // "Call sequence": the evidence that technicians were called one at a time.
@@ -525,19 +808,48 @@ function renderDetail(r) {
     : '-'}</td></tr>
 </table></div>
 
-<h2>Technicians</h2>
+${tabs([
+    { id: 'merged', label: 'Merged transcript', body: renderMerged(r) },
+    { id: 'elevenlabs', label: 'ElevenLabs transcript', body: renderTranscript(r) },
+    { id: 'twilio', label: 'Twilio transcripts', body: renderTwilioTranscripts(r) },
+    { id: 'recordings', label: `Recordings${r.twilio ? ` (${(r.twilio.recordings || []).length})` : ''}`, body: renderRecordingsTab(r) },
+    { id: 'technicians', label: 'Technicians', body: `<h2>Technicians</h2>
 <p>Each time is shown with the seconds since the tool call underneath.</p>
 <div class="wrap"><table>
 <tr><th>#</th><th>Number</th><th>Outcome</th><th>Dialled</th><th>Ringing</th><th>Answered</th><th>Outcome at</th><th>Resident told</th><th>Machine detection</th><th>Detail</th><th>Call SID</th></tr>
 ${techRows.join('\n')}
 </table></div>
 
-${renderSequence(r)}
+${renderSequence(r)}` },
+    { id: 'raw', label: 'Raw record', body: `<h2>Raw record</h2>\n<pre>${esc(JSON.stringify(r, null, 2))}</pre>` },
+  ])}`);
+}
 
-${renderTranscript(r)}
-
-<h2>Raw record</h2>
-<pre>${esc(JSON.stringify(r, null, 2))}</pre>`);
+// Tabs without scripts: one hidden radio button per tab, and CSS shows the panel whose
+// button is checked. A few lines of script only keep the chosen tab in the address
+// (#twilio etc.), so reloading the page stays on it.
+function tabs(list) {
+  const css = list.map(({ id }) => `#tab-${id}:checked ~ .tabbar label[for="tab-${id}"] { background: #fff; border-bottom-color: #fff; font-weight: 600; }
+#tab-${id}:checked ~ #panel-${id} { display: block; }`).join('\n');
+  return `<style>
+${css}
+</style>
+<div class="tabs">
+${list.map(({ id }, i) => `<input type="radio" name="tab" id="tab-${id}"${i === 0 ? ' checked' : ''}>`).join('\n')}
+<div class="tabbar">${list.map(({ id, label }) => `<label for="tab-${id}">${esc(label)}</label>`).join('')}</div>
+${list.map(({ id, body }) => `<div class="panel" id="panel-${id}">
+${body}
+</div>`).join('\n')}
+</div>
+<script>
+(function () {
+  var pick = document.getElementById('tab-' + location.hash.slice(1));
+  if (pick) pick.checked = true;
+  document.querySelectorAll('.tabs > input').forEach(function (input) {
+    input.addEventListener('change', function () { history.replaceState(null, '', '#' + input.id.slice(4)); });
+  });
+})();
+</script>`;
 }
 
 // List page: one word per transfer for the one-at-a-time check.
