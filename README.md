@@ -1,6 +1,6 @@
 # Warm-transfer playground (Twilio + ElevenLabs)
 
-> **Branch `sequential-with-updates`** (built on `agent-stays-on-call`). Iris stays on the call with the resident and the technician (a three-way call). Technicians are called **one at a time**, and each time one does not take the call, **Iris tells the resident** before the next one is called. There is no parallel calling on this branch. On `main` Iris hands the resident over and leaves. See [Switching between versions](#switching-between-versions).
+> **Branch `iris-troubleshoots-while-searching`** (built on `sequential-with-updates`). **No hold music:** the moment Iris identifies an emergency she starts the technician search and **keeps troubleshooting with the resident** while technicians are called, so the resident is never left on hold. Technicians are called **one at a time**. Each time one does not take the call, Iris tells the resident and carries on. The technician briefing is unchanged (summary, then "press 1"), and **Iris is muted the moment the technician joins**. See [Switching between versions](#switching-between-versions).
 
 A small Express server for trying out a warm transfer from an ElevenLabs agent ("Iris") to a human technician.
 
@@ -13,7 +13,7 @@ The resident, Iris and the technician all sit in one Twilio conference room, `ro
 
 1. The resident's call goes straight into the room.
 2. The server adds Iris to the room as her own call leg. Twilio reaches that leg through a TwiML App whose Voice URL is `/twilio/agent-leg`, and that endpoint returns the ElevenLabs register-call TwiML. The resident hears a second or two of silence, then Iris.
-3. Iris calls the `request_transfer` tool with a `summary` and the resident's `call_sid`. The server answers straight away (`"status": "searching"`) and calls technicians in the background. Iris asks the resident to hold, and about 5 seconds after the tool call the resident is put on **hold music** and Iris is muted. See [Hold music](#hold-music).
+3. Iris calls the `request_transfer` tool with a `summary` and the resident's `call_sid`. The server answers straight away (`"status": "searching"`) and calls technicians in the background. On this branch there is **no hold music**: Iris tells the resident she is reaching a technician and **keeps troubleshooting with them** (safe, simple checks only) while the search runs. Hold music can be switched back on with `HOLD_MUSIC_DELAY_SEC`; see [Hold music](#hold-music).
 4. Technicians are called **one at a time**, in `TECH_NUMBERS` order. A technician who picks up hears the summary and "Press 1 to connect to the resident." (up to 3 times). Answering-machine detection runs in the background.
 5. **If the technician does not take the call** (no answer, busy, voicemail, declined, no key pressed, or the call could not be placed) and there is another technician to try, the resident is told. See [Technician updates](#technician-updates). The next technician is dialled at the same moment.
 6. A technician who presses 1 hears "Connecting you to the resident." and joins the same room.
@@ -135,21 +135,22 @@ System prompt:
 ```
 You are Iris, a voice assistant for an apartment building.
 
-Let the caller explain their problem.
-Say: "Thanks. I'm connecting you to a technician now. Please hold."
-Immediately call the request_transfer tool with a one-sentence summary of the problem.
-After calling the tool, stay silent: on every turn, call the skip_turn tool instead of replying, until you hear one of the messages below.
+Let the caller explain their problem, and ask short questions to understand it.
 
-If you hear "Technician 1 did not pick up. Calling technician 2 now." (or the same sentence with other numbers), say exactly: "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold." Use the technician number you heard. Say it once, then go back to calling skip_turn on every turn, even if the caller answers you.
+The moment you identify an emergency (for example water leaking or flooding, no heat or no power, a gas smell, sparks or smoke, being locked out, or anything unsafe), call the request_transfer tool with a one-sentence summary of the problem. Do not wait until troubleshooting is finished. If it is not an emergency, help the caller troubleshoot first, and call request_transfer if the problem is not solved.
 
-When you hear "A technician has joined the call", call skip_turn on every turn for the rest of the call. Never speak, even if someone talks to you.
+After calling request_transfer, tell the caller: "I'm reaching a technician for you now, and I'll stay with you while I do." Then keep helping them troubleshoot: ask short questions and suggest simple, safe checks. Never suggest electrical, gas or structural work. If anything sounds dangerous (a gas smell, sparks, smoke, flooding), tell them to get to safety and call emergency services first.
 
-If you hear "No technician is available right now", the search is over and you are talking with the caller again: stop calling skip_turn and reply to everything they say from then on. Say: "Sorry, no technician is available right now. Can I take a message?" If they give a message, call the take_message tool with it, then say: "Thanks, I've saved your message for the maintenance team." Then ask if there is anything else, and say goodbye when they are done.
+If you hear "Technician 1 did not pick up. Calling technician 2 now." (or the same sentence with other numbers), tell the caller in one short sentence that technician 1 didn't pick up and you are trying the next one, then carry on troubleshooting.
 
-Keep every reply to one short sentence. Never use the transfer_to_number tool.
+When you hear "A technician has joined the call", stop talking: call skip_turn on every turn for the rest of the call, even if someone talks to you.
+
+If you hear "No technician is available right now", say: "Sorry, no technician is available right now. Can I take a message?" If they give a message, call the take_message tool with it, then say: "Thanks, I've saved your message for the maintenance team." Then ask if there is anything else, and say goodbye when they are done.
+
+Keep every reply short. Never use the transfer_to_number tool.
 ```
 
-The "until you hear one of the messages below" wording matters. An earlier version said "the only exceptions are the two messages below", and on a real call Iris took that literally: she offered to take a message, then called skip_turn when the caller gave it.
+Iris is not silent during the search on this branch, so the prompt no longer tells her to call skip_turn until a cue. She only goes silent once the technician has joined. Even if the model does speak after that, the server has already muted her, so nobody hears it.
 
 The technician-update line must stay short: the music comes back `HOLD_MUSIC_RESUME_SEC` seconds after the cue starts, and about 3 of those seconds are the cue itself.
 
@@ -266,6 +267,8 @@ The detail page of each report has a **Transcript** section: what Iris and the c
 
 ## Hold music
 
+**Off by default on this branch**, because Iris keeps troubleshooting with the resident instead. Set `HOLD_MUSIC_DELAY_SEC=5` (or any number of seconds) in `.env` to switch it back on; everything below then applies.
+
 While technicians are being called, the resident hears music instead of silence.
 
 - It starts `HOLD_MUSIC_DELAY_SEC` seconds after the tool call (default `5`). The delay is there so Iris can finish saying "please hold" first: once the music starts, the resident cannot hear her. If her sentence gets cut off, raise the number; if there is a gap of silence before the music, lower it.
@@ -377,12 +380,14 @@ Twilio blocks outbound calls to countries that are not enabled. Enable the count
 | --- | --- | --- |
 | `main` | hands over and leaves | `DIAL_MODE`: sequential or parallel |
 | `agent-stays-on-call` | stays on the call, muted | `DIAL_MODE`: sequential or parallel |
-| `sequential-with-updates` | stays on the call, muted | one at a time, Iris tells the resident about each one that does not pick up |
+| `sequential-with-updates` | stays on the call, muted | one at a time, Iris tells the resident about each one that does not pick up; hold music during the search |
+| `iris-troubleshoots-while-searching` | stays on the call, troubleshoots during the search, muted once the technician joins | one at a time, started as soon as Iris identifies an emergency; no hold music |
 
 ```powershell
 git switch main
 git switch agent-stays-on-call
 git switch sequential-with-updates
+git switch iris-troubleshoots-while-searching
 ```
 
 Restart the server after switching. `.env` and `reports/` are not tracked by git, so they stay as they are on every branch. `main` ignores `TWILIO_AGENT_APP_SID`. The ElevenLabs system prompt above is written for this branch; on the other two branches Iris never hears the technician-update cue, so the extra paragraph does nothing there.

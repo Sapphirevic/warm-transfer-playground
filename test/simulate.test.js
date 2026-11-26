@@ -571,7 +571,7 @@ test('hold music: not started if the search is already over, and can be switched
   const off = await setup({ holdDelayMs: null });
   t.after(off.close);
   const reply = await off.residentAsksForTransfer();
-  assert.match(reply.body.message, /keep talking with them/);
+  assert.match(reply.body.message, /help the resident troubleshoot the problem/);
   await tick();
   assert.deepEqual(off.roomActions, []);
 });
@@ -1099,6 +1099,8 @@ test('config: DIAL_MODE=parallel only warns, and HOLD_MUSIC_RESUME_SEC is read a
   const plain = loadConfig(env);
   assert.deepEqual(plain.warnings, []);
   assert.equal(plain.holdResumeMs, 13_000, 'default 13 seconds (see decision.md D13)');
+  assert.equal(plain.holdDelayMs, null, 'no hold music by default on this branch: Iris troubleshoots instead');
+  assert.equal(loadConfig({ ...env, HOLD_MUSIC_DELAY_SEC: '5' }).holdDelayMs, 5_000, 'music can be switched back on');
   assert.equal('dialMode' in plain, false);
   assert.deepEqual(plain.techNumbers, ['+15550000001', '+15550000002']);
 
@@ -1560,4 +1562,31 @@ test('take_message: a message on a call with no transfer is accepted and logged 
   assert.equal(saved.status, 200);
   assert.equal(s.state.transfers.size, 0, 'no transfer and no report are created');
   assert.ok(s.logs.some((line) => line.includes('MESSAGE call=') && line.includes('no transfer on this call, kept in this log only') && line.includes('lift is noisy')));
+});
+
+// ---------------------------------------------------------------- Iris troubleshoots while searching
+
+test('troubleshooting branch: no hold music, Iris is told to troubleshoot safely, updates are woven in, and she is muted when the technician joins', async (t) => {
+  const s = await setup({ holdDelayMs: null }); // the default on this branch
+  t.after(s.close);
+  const reply = await s.residentAsksForTransfer();
+  const msg = reply.body.message;
+  assert.match(msg, /help the resident troubleshoot the problem/);
+  assert.match(msg, /Never suggest electrical, gas or structural work/);
+  assert.match(msg, /gas smell, sparks, smoke, flooding\) tell them to get to safety and call emergency services/);
+  assert.match(msg, /then carry on troubleshooting with them while the next technician is called/);
+  assert.doesNotMatch(msg, /Hold music starts/);
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(s.holds, [], 'the resident is never put on hold');
+  assert.deepEqual(s.mutes, [], 'Iris is not muted during the search');
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.roomActions, ['cue:tech-update:0'], 'the update is only a cue to Iris; nothing to undo');
+
+  await s.techAcceptsAndJoins(1);
+  assert.deepEqual(s.roomActions, ['cue:tech-update:0', 'mute:true', 'announce:joined'], 'Iris is muted the moment the technician is in the room');
+  assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, true);
+  assert.deepEqual(s.report().hold_periods, []);
 });

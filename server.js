@@ -40,7 +40,7 @@ app.listen(config.port, (err) => {
   console.log(`  ring timeout: ${config.ringTimeoutSec}s`);
   console.log(`  transfer    : agent stays on the call (Iris leg via TwiML App ${config.agentAppSid})`);
   console.log(`  hold music  : ${config.holdDelayMs === null
-    ? 'off'
+    ? 'off (Iris troubleshoots with the resident while technicians are called)'
     : `starts ${config.holdDelayMs / 1000}s after the tool call, back ${config.holdResumeMs / 1000}s after each update`}`);
   for (const warning of config.warnings) console.log(`WARN ${warning}`);
   console.log(`  reports     : http://localhost:${config.port}/reports`);

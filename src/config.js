@@ -45,7 +45,10 @@ function loadConfig(env = process.env) {
     warnings.push(`DIAL_MODE=${env.DIAL_MODE.trim()} is ignored: technicians are always called one at a time on this branch. Set DIAL_MODE=sequential (valid on every branch) to silence this.`);
   }
 
-  const holdSetting = (env.HOLD_MUSIC_DELAY_SEC || '5').trim().toLowerCase();
+  // Branch "iris-troubleshoots-while-searching": no hold music by default. Iris stays with
+  // the resident and helps them troubleshoot while technicians are called. Set a number of
+  // seconds (e.g. HOLD_MUSIC_DELAY_SEC=5) to bring the music back.
+  const holdSetting = (env.HOLD_MUSIC_DELAY_SEC || 'off').trim().toLowerCase();
   const holdDelayMs = holdSetting === 'off' ? null : Number(holdSetting) * 1000;
   if (holdDelayMs !== null && !(holdDelayMs >= 0)) {
     throw new Error(`HOLD_MUSIC_DELAY_SEC must be a number of seconds or "off", got "${env.HOLD_MUSIC_DELAY_SEC}"`);

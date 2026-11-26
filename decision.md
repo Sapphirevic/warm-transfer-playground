@@ -10,9 +10,33 @@ Update it whenever a design choice is made or changed, and in the same commit as
 | `main` | - | Ava hands the resident over to the technician and leaves. `DIAL_MODE` sequential or parallel. |
 | `agent-stays-on-call` | `main` | Resident, Ava and technician share one conference. Ava stays, muted while the technician is on. Hold music during the search. Transcripts in reports. |
 | `inbound-calls` | - | On the remote; not reviewed in this log yet. |
-| `sequential-with-updates` | `agent-stays-on-call` | Technicians called one at a time. Ava tells the resident each time one does not pick up. **Current working branch.** |
+| `sequential-with-updates` | `agent-stays-on-call` | Technicians called one at a time. Iris (formerly Ava) tells the resident each time one does not pick up. Hold music during the search. |
+| `iris-troubleshoots-while-searching` | `sequential-with-updates` | No hold music: Iris starts the search as soon as she identifies an emergency and keeps troubleshooting with the resident; muted once the technician joins. **Current working branch.** |
 
 ## Decisions
+
+### 2026-11-26 - Iris troubleshoots while searching (v0.4.0, branch iris-troubleshoots-while-searching)
+
+**D18. No hold music: Iris troubleshoots with the resident during the search.**
+Requested by the team: "The moment Iris identifies an emergency, she should start reaching out to the technician while continuing to troubleshoot with the resident, so the resident is never left on hold."
+
+What changed:
+- `HOLD_MUSIC_DELAY_SEC` now defaults to `off`, so the resident is never put on hold and Iris is not muted during the search. A number of seconds brings the music back, with all the D6/D13 behaviour.
+- The `request_transfer` reply now tells Iris to stay with the resident and troubleshoot, with safety limits: never electrical, gas or structural work. If anything sounds dangerous (a gas smell, sparks, smoke, flooding), she tells them to get to safety and call emergency services. After a technician-update cue she gives the update and carries on troubleshooting.
+- A new ElevenLabs prompt is in the README:
+  - On an emergency, call `request_transfer` at once and keep troubleshooting.
+  - Otherwise troubleshoot first, and transfer if the problem isn't solved. That second rule was our default, not part of the request.
+  - Go silent (skip_turn) only after "A technician has joined the call".
+
+Kept as before, by decision:
+- **Technician briefing:** the summary is read to the technician, then "press 1". Two other options were offered and declined: a live Iris conversation with the technician, or a recording in Iris's voice.
+- **Iris is muted the moment the technician joins** (already the case since `agent-stays-on-call`).
+- **Technician updates (D3)** are a cue to Iris only. With no hold, nothing is unmuted or taken off hold around them.
+
+To check on a real call:
+- Iris weaves the update cue into a live conversation without talking over the resident awkwardly. The cue is heard by her as speech, so it may interrupt her mid-sentence.
+- Troubleshooting stays within the safety limits.
+- The mute lands cleanly when the technician joins mid-conversation.
 
 ### 2026-11-26 - server start-up error (v0.3.1)
 

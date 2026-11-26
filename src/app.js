@@ -809,13 +809,17 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     saveReport(t);
 
     const holdDelayMs = config.holdDelayMs;
+    // Branch "iris-troubleshoots-while-searching": with hold music off (the default here)
+    // Iris stays with the resident during the search and helps them troubleshoot.
     const whileSearching = holdDelayMs === null
-      ? 'Tell the resident you are finding someone and keep talking with them. '
+      ? 'Tell the resident you are finding a technician and will stay with them meanwhile. ' +
+        'While technicians are being called, help the resident troubleshoot the problem: ask short questions about it and suggest simple, safe checks they can do. ' +
+        'Never suggest electrical, gas or structural work, and if anything sounds dangerous (gas smell, sparks, smoke, flooding) tell them to get to safety and call emergency services. '
       : 'Say one short sentence asking the resident to hold while you connect them with a technician, then say nothing more. ' +
         `Hold music starts for the resident in about ${Math.round(holdDelayMs / 1000)} seconds and they cannot hear you while it plays. `;
 
     const afterUpdate = holdDelayMs === null
-      ? 'then keep talking with them while the next technician is called. '
+      ? 'then carry on troubleshooting with them while the next technician is called. '
       : 'then say nothing more: the hold music comes back a few seconds later. ';
 
     // Answer the tool straight away; the search carries on after this response.
@@ -826,7 +830,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         `You stay on the call. If you hear "Technician 1 did not pick up. Calling technician 2 now." (or the same with other numbers), the resident can hear you: ` +
         `tell them in one short sentence that technician 1 did not pick up and you are now trying the next one, ${afterUpdate}` +
         `When you hear "${ANNOUNCEMENTS.joined}", a technician is talking with the resident: say nothing at all from then on, do not introduce anyone and do not answer, even if spoken to. ` +
-        `If you hear "${ANNOUNCEMENTS.unavailable}", the resident can hear you again: stop calling skip_turn, apologise and offer to take a message. ` +
+        `If you hear "${ANNOUNCEMENTS.unavailable}", the search is over: apologise and offer to take a message${holdDelayMs === null ? '' : ' (the resident can hear you again; stop calling skip_turn)'}. ` +
         'If they give one, call the take_message tool with it, then tell them it is saved for the maintenance team, and keep replying to them until they are done.',
     });
     setImmediate(() => startSearch(t));
