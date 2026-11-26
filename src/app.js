@@ -1367,7 +1367,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         `Hold music starts for the resident in about ${Math.round(holdDelayMs / 1000)} seconds and they cannot hear you while it plays. `;
 
     const afterUpdate = holdDelayMs === null
-      ? 'then carry on troubleshooting with them while the next technician is called. '
+      // Keep the thread (D35): on call CA9eb7…3a09 she led with the news and "let's keep
+      // going", dropping what the caller had just said ("I have my plunger now").
+      ? 'then continue the troubleshooting exactly where you left off: respond to what the caller last said and go on with the next step, without restarting or repeating anything already asked. '
       : 'then say nothing more: the hold music comes back a few seconds later. ';
 
     // Answer the tool straight away; the search carries on after this response.

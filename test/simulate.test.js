@@ -1627,7 +1627,7 @@ test('troubleshooting branch: no hold music, Iris is told to troubleshoot safely
   assert.match(msg, /help the resident troubleshoot the problem/);
   assert.match(msg, /Never suggest electrical, gas or structural work/);
   assert.match(msg, /gas smell, sparks, smoke, flooding\) tell them to get to safety and call emergency services/);
-  assert.match(msg, /then carry on troubleshooting with them while the next technician is called/);
+  assert.match(msg, /then continue the troubleshooting exactly where you left off: respond to what the caller last said/);
   assert.doesNotMatch(msg, /Hold music starts/);
 
   await new Promise((resolve) => setTimeout(resolve, 60));
