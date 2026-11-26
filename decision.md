@@ -15,6 +15,21 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - requirements confirmed, prompt step 1 done
+
+**Team requirements (restated 2026-11-26) against what is built:**
+1. **The moment Iris identifies the problem, she starts reaching the technician and keeps troubleshooting, never on hold.**
+   - Server: done (D18). No hold music, and Iris stays unmuted during the search.
+   - Prompt: done in step 1 below.
+2. **Twilio briefs the technician first, then they join** (as before). Done, unchanged.
+3. **Iris mutes once the technician is connected.** Done (since `agent-stays-on-call`).
+
+**D22. Prompt step 1, live on "Sequential Testing-Victoria1".**
+- The pattern is "say the line, then immediately call `request_transfer`", followed by troubleshooting. Iris says the line once, never says "please hold", never goes silent before a technician joins, and never claims a technician is on the way.
+- Checked in Preview (`conv_8501…tbg0g`): the line was said once at 0:11; `request_transfer` was called at 0:13 (Failed, 607 ms, which is the expected 404 for Preview's placeholder `call_sid`); she kept troubleshooting at 0:14.
+- Wordings that failed on this LLM (`deepseek-v41-flash`): "call the tool before you say anything" and "say the line after the tool". Both made Iris speak the line without calling the tool.
+- Next, step 2: if Iris's line drops while the resident is still on, rejoin her instead of ending the call. Waiting for a phone-call check of step 1.
+
 ### 2026-11-26 - own agent, own tools, own tunnel: first working call on this branch
 
 **D21. Each tester has their own ElevenLabs agent, tools, TwiML App and ngrok tunnel.**
