@@ -250,6 +250,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       cueMaxTimer: null,
       pendingHandover: null, //            set while waiting for Iris to finish a sentence (handOver)
       handoverTimer: null,
+      handoverGraceTimer: null,
     };
   }
 
@@ -550,18 +551,26 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   }
 
   // A technician has joined the room. Iris is muted and the room hears "A technician has
-  // joined the call", but not in the middle of her sentence (decision.md D25): if she is
-  // talking, wait until Twilio reports she stopped, or HANDOVER_MAX_WAIT_MS at the latest.
+  // joined the call", but not in the middle of her sentence (decision.md D25, D27):
+  //  - if she is talking, wait until Twilio reports she stopped;
+  //  - if she is quiet, wait HANDOVER_GRACE_MS first: she may be just starting a sentence
+  //    that Twilio has not reported yet (seen on a real call). If she starts, wait for her
+  //    to finish; if not, hand over when the grace period ends;
+  //  - never longer than HANDOVER_MAX_WAIT_MS in total.
   // Order unchanged: Iris muted, hold music off, then the announcement.
   function handOver(residentCallSid, t) {
     const resident = residentCalls.get(residentCallSid);
     if (!resident) return;
     let done = false;
+    const irisSid = resident.agent.callSid;
+    const irisTalking = () => Boolean(irisSid && resident.speaking.has(irisSid));
     const go = (why) => {
       if (done) return;
       done = true;
       clearTimeout(resident.handoverTimer);
+      clearTimeout(resident.handoverGraceTimer);
       resident.handoverTimer = null;
+      resident.handoverGraceTimer = null;
       resident.pendingHandover = null;
       if (resident.ended) return;
       if (why) log(`HANDOVER ${why}: muting Iris and announcing the technician`);
@@ -569,11 +578,18 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       endHold(t, 'technician joined');
       announce(residentCallSid, 'joined');
     };
-    const irisTalking = Boolean(resident.agent.callSid && resident.speaking.has(resident.agent.callSid));
-    if (!irisTalking) return go(null);
-    log(`HANDOVER waiting for Iris to finish her sentence before muting her`);
+    if (!irisSid || resident.agent.state !== 'in') return go(null); // no Iris to wait for
     resident.pendingHandover = go;
     resident.handoverTimer = setTimeout(() => go('waited the maximum time'), config.handoverMaxWaitMs);
+    if (irisTalking()) {
+      log('HANDOVER waiting for Iris to finish her sentence before muting her');
+      return;
+    }
+    resident.handoverGraceTimer = setTimeout(() => {
+      resident.handoverGraceTimer = null;
+      if (irisTalking()) log('HANDOVER Iris started a sentence: waiting for her to finish');
+      else go(config.handoverGraceMs ? 'Iris is quiet' : null);
+    }, config.handoverGraceMs);
   }
 
   // Technician i did not take the call and technician i+1 is about to be called.
@@ -807,6 +823,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     resident.ended = true;
     dropCues(residentCallSid, 'resident gone');
     clearTimeout(resident.handoverTimer);
+    clearTimeout(resident.handoverGraceTimer);
     resident.pendingHandover = null;
     log(`RESIDENT gone resident=${residentCallSid} (${why})`);
     scheduleTranscript(residentCallSid);
@@ -1017,11 +1034,17 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       return res.status(404).json({ status: 'error', message: 'No technician search for this call yet. Call request_transfer first.' });
     }
     if (t.status !== 'searching') {
-      // Too late to matter (a technician is connected or the search is over), but harmless.
+      // Too late for a brief, but kept for the report.
       t.progressUpdates.push({ text, at: Date.now(), used: false });
       saveReport(t);
       log(`PROGRESS resident=${callSid} (after the search, not briefed): ${JSON.stringify(text)}`);
-      return res.json({ status: 'noted', message: 'Noted. The search is already over, so carry on with the caller.' });
+      // A technician accepted and is joining (or has joined): Iris wraps up instead of
+      // starting a new question that would be cut off at the handover (D27).
+      const joining = t.status === 'bridging' || t.status === 'connected';
+      const message = joining
+        ? 'A technician has accepted and is joining the call now. Finish your current point in a few words and do not ask a new question or start a new topic.'
+        : 'Noted. The search is already over, so carry on with the caller.';
+      return res.json({ status: 'noted', message });
     }
     t.progress = text;
     t.progressUpdates.push({ text, at: Date.now(), used: true });

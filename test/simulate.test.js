@@ -31,7 +31,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 // holdDelayMs: null = no hold music (most tests), a number = music starts that long after the tool call.
 // holdResumeMs: how long after a "technician did not pick up" update the music comes back.
-async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0 } = {}) {
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0, handoverGraceMs = 0 } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const agentLegs = []; //      conferences(sid).participants.create(...) -> Iris joining
@@ -127,6 +127,7 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
     cueMaxWaitMs,
     handoverMaxWaitMs,
     updateFallbackMs,
+    handoverGraceMs,
     holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
     transcriptRetryMs: [5],
     reportsDir: path.join(tmp, 'reports'),
@@ -1897,4 +1898,60 @@ test('handover: waits up to 10 s by default', () => {
   assert.equal(c.handoverMaxWaitMs, 10_000);
   assert.equal(c.updateFallbackMs, 8_000);
   assert.equal(loadConfig({ ...env, UPDATE_FALLBACK_MS: '0' }).updateFallbackMs, 0);
+});
+
+// ---------------------------------------------------------------- handover grace and wrap-up (D27)
+
+test('handover grace: Iris quiet at the join but starting a sentence is not cut off (the 15:37 race)', async (t) => {
+  const s = await setup({ handoverGraceMs: 300, handoverMaxWaitMs: 5000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+  await s.techAcceptsAndJoins(0); // Iris quiet at this moment
+  assert.deepEqual(s.roomActions, [], 'not muted at once: grace period');
+  await s.room('participant-speech-start', { CallSid: iris }); // her next sentence starts within the grace
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.deepEqual(s.roomActions, [], 'still talking after the grace: keep waiting');
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris started a sentence: waiting for her to finish')));
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await tick();
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined'], 'muted only after she finished');
+});
+
+test('handover grace: if Iris stays quiet, the handover happens when the grace ends', async (t) => {
+  const s = await setup({ handoverGraceMs: 150, handoverMaxWaitMs: 5000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.techAcceptsAndJoins(0);
+  assert.deepEqual(s.roomActions, []);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined']);
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris is quiet: muting Iris')));
+});
+
+test('wrap-up: while a technician is joining, update_transfer tells Iris to finish her point and not start a new one', async (t) => {
+  const s = await setup({ handoverGraceMs: 0 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.tech(0).answered();
+  await s.tech(0).press('1'); // bridging: technician on the way into the room
+  await tick();
+  const joining = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Router restarted, still red' });
+  assert.match(joining.body.message, /A technician has accepted and is joining the call now\. Finish your current point in a few words and do not ask a new question/);
+  assert.equal(s.report().progress_updates.at(-1).in_brief, false);
+
+  // After everyone has given up, the old message stays.
+  const over = await setup({ techNumbers: ['+15550000001'] });
+  t.after(over.close);
+  await over.residentAsksForTransfer();
+  await over.tech(0).status('no-answer');
+  await tick();
+  const after = await over.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'x' });
+  assert.match(after.body.message, /The search is already over/);
+});
+
+test('handover grace: default is 1.5 s', () => {
+  const env = { TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'x', TWILIO_PHONE_NUMBER: TWILIO_NUMBER, ELEVENLABS_API_KEY: 'x', ELEVENLABS_AGENT_ID: 'agent_x', TECH_NUMBERS: '+15550000001', PUBLIC_BASE_URL: PUBLIC, TOOL_SECRET: 'x', TWILIO_AGENT_APP_SID: APP_SID };
+  assert.equal(loadConfig(env).handoverGraceMs, 1500);
+  assert.equal(loadConfig({ ...env, HANDOVER_GRACE_MS: '0' }).handoverGraceMs, 0);
 });

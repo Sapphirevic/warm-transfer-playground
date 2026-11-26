@@ -15,6 +15,27 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - Iris wraps up before the handover (v0.8.1)
+
+**D27. Handover grace period, and a wrap-up instruction while the technician joins.**
+
+On call `CAf0153c…8659` (15:36 UTC) the D26 changes worked:
+- The technician update was given cleanly via the tool reply ("Technician one didn't pick up…").
+- The technician heard progress in the brief, and newer progress on pressing 1.
+
+But Iris was cut off at the handover. The resident remarked on the call: "get to the end of its sentence, then… technician has joined the call". The log showed a race:
+- Iris stopped talking at 15:37:47.30.
+- The technician joined at 15:37:47.78. With Iris "quiet", she was muted at once (15:37:48.9).
+- But she was starting a new question ("Thanks for trying that… can you check whether the cable…"), prompted by an `update_transfer` reply at 1:02 that said "carry on with the caller" while the technician was already joining.
+
+What changed:
+- **While a technician is joining or connected,** the `update_transfer` reply tells Iris: "A technician has accepted and is joining the call now. Finish your current point in a few words and do not ask a new question or start a new topic."
+- **Handover grace period (`HANDOVER_GRACE_MS`, 1.5 s).** If Iris is quiet when the technician joins, the server waits 1.5 s. If she starts talking in that time, it waits for her to finish (still capped by `HANDOVER_MAX_WAIT_MS`, 10 s); if not, the handover happens when the grace ends.
+
+Checks:
+- 82/82 tests, 3 runs. 4 new tests cover: the 15:37 race replayed, a quiet Iris, the wrap-up reply while joining (with the old message once the search is over), and the default.
+- Broken on purpose: grace ignoring a starting sentence fails 1 test; no wrap-up message fails 1.
+
 ### 2026-11-26 - a cleaner flow: updates as text, update on accepting, longer handover (v0.8.0)
 
 **D26. Technician updates go to Iris in her `update_transfer` reply, with the audio cue only as a fallback.**
