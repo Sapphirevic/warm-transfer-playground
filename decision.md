@@ -15,6 +15,18 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - every call is an emergency (prompt only)
+
+**D19. For this task, every call is treated as an emergency.** Iris calls `request_transfer` as soon as the caller has explained the problem, then troubleshoots while the search runs. This replaces the D18 default of troubleshooting first for non-emergencies. It is a prompt change only; the server is unchanged.
+
+The team's prompt was adjusted in four places before use:
+- **No greeting line in the prompt.** The agent's First message already greets, so it would greet twice.
+- **No "I'll hand you over" line.** Iris is muted before the room hears "A technician has joined the call", so her line would not be heard, or would repeat the announcement if she weren't muted.
+- **`take_message` is called,** so messages reach the report.
+- **The breaker step is limited** to "only if it is safe to reach and they are not standing in water".
+
+Still open: the server's `request_transfer` reply says "never suggest electrical, gas or structural work", which contradicts the breaker step. A proposed replacement is waiting for a decision.
+
 ### 2026-11-26 - Iris troubleshoots while searching (v0.4.0, branch iris-troubleshoots-while-searching)
 
 **D18. No hold music: Iris troubleshoots with the resident during the search.**
