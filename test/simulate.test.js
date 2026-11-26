@@ -1989,7 +1989,7 @@ test('wrap-up: while a technician is joining, update_transfer tells Iris to fini
   await s.tech(0).press('1'); // bridging: technician on the way into the room
   await tick();
   const joining = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Router restarted, still red' });
-  assert.match(joining.body.message, /A technician has accepted and is joining the call now\. Finish your current point in a few words and do not ask a new question/);
+  assert.match(joining.body.message, /A technician has accepted and is joining the call in a few seconds, already briefed\. Finish your point in a few words, then tell the caller in one short sentence that the technician is joining now/, 'first reply after press 1: she tells the caller (D34)');
   assert.equal(s.report().progress_updates.at(-1).in_brief, false);
 
   // After everyone has given up, the old message stays.
@@ -2327,4 +2327,55 @@ test('brief: progress newer than the brief is read on pressing 1', async (t) => 
   await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Valve under the sink is off.' });
   const accept = await s.tech(0).press('1');
   assert.match(accept.text, /<Say>Update: Valve under the sink is off\. Connecting you to the resident\.<\/Say>/);
+});
+
+// ---------------------------------------------------------------- told at press 1 (D34)
+
+test('handoff (call 18:07 replayed): the update_transfer right after press 1 asks Iris to tell the caller; tech comes in once she has, no Twilio announcement', async (t) => {
+  const s = await setup({ handoverGraceMs: 100, handoverReplyWaitMs: 3000, handoverWrapUpWaitMs: 2000, handoverMaxWaitMs: 8000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+  await s.tech(0).answered();
+  await s.tech(0).press('1');
+  // 0.6 s later on the real call: Iris's update_transfer, while the technician is still joining.
+  const reply = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Faucet confirmed fully off.' });
+  assert.match(reply.body.message, /tell the caller in one short sentence that the technician is joining now/);
+  // "Good news, a technician is joining us now."
+  await s.room('participant-speech-start', { CallSid: iris });
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await s.tech(0).joins();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.deepEqual(s.roomActions, ['tech:hold', 'mute:true', 'tech:unhold', 'tech:unmute', 'cue:joined']);
+  assert.deepEqual(s.announcements(), [], 'Iris told the caller: no Twilio announcement');
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER Iris told the caller: muting Iris')));
+});
+
+test('handoff (told at press 1): still saying it when the technician joins -> technician waits, then comes in', async (t) => {
+  const s = await setup({ handoverGraceMs: 100, handoverReplyWaitMs: 3000, handoverWrapUpWaitMs: 2000, handoverMaxWaitMs: 8000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+  await s.tech(0).answered();
+  await s.tech(0).press('1');
+  await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'x' });
+  await s.room('participant-speech-start', { CallSid: iris });
+  await s.tech(0).joins();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(s.roomActions, ['tech:hold'], 'not cut off');
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.deepEqual(s.roomActions, ['tech:hold', 'mute:true', 'tech:unhold', 'tech:unmute', 'cue:joined']);
+});
+
+test('handoff (told at press 1): Iris never says it -> fallback announcement', async (t) => {
+  const s = await setup({ handoverGraceMs: 50, handoverReplyWaitMs: 3000, handoverWrapUpWaitMs: 200, handoverMaxWaitMs: 8000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.tech(0).answered();
+  await s.tech(0).press('1');
+  await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'x' });
+  await s.tech(0).joins();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(s.roomActions, ['tech:hold', 'mute:true', 'tech:unhold', 'tech:unmute', 'announce:joined']);
 });

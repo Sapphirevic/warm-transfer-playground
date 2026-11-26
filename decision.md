@@ -16,6 +16,27 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - Iris is told at press 1, in the reply she actually gets (v0.14.0)
+
+**D34. The first `update_transfer` reply after the technician presses 1 asks Iris to tell the caller in one sentence that the technician is joining. The technician comes in once she has said it and is quiet. The fallback wait drops from 8 s to 5 s.**
+
+Call `CA73ec…5b8a` (18:07 UTC), as Victoria reported it: "the agent said, let's work on this together and stopped talking. This was clean but not the best experience."
+- **18:08:20.76** The technician presses 1.
+- **18:08:21.33** Iris calls `update_transfer`. The old reply (D27) said "finish your point… do not ask a new question".
+- **18:08:26.6** She says "Let's keep working on this together" and goes quiet, as told.
+- **18:08:27.99** The technician joins. The D33 handover request needed another `update_transfer` call, which never came: she had stopped asking questions.
+- **18:08:36** The 8 s fallback kicks in, and the room hears Twilio's announcement at 18:08:38.5. About 12 s of silence for the resident.
+
+What changed:
+- **The first reply after press 1** now says: "…joining in a few seconds, already briefed. Finish your point, then tell the caller in one short sentence that the technician is joining now… Do not ask a new question."
+- **When the technician joins:** if Iris has said it and is quiet for 1.5 s, the technician comes in at once (no Twilio announcement). If she is still saying it, the technician waits on hold until she finishes. If she never says it within 6 s of the reply, the fallback announcement is used.
+- **If no reply came before the join,** D33 still applies, with the fallback after 5 s instead of 8.
+- **Trade-off:** the technician is still hearing "Update… connecting you" when Iris says her line, so they don't hear it. They already have the brief.
+
+Checks:
+- 99/99 tests, one run (server behaviour only). 3 new tests replay this call's order of events.
+- Not yet heard on a real call.
+
 ### 2026-11-26 - handover through the update_transfer reply, no spoken cue (v0.13.0)
 
 **D33. Iris is asked to hand over in her next `update_transfer` reply, not by a spoken cue. Replaces the cue part of D32; the brief fix in D32 stays.**
