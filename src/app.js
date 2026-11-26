@@ -1152,6 +1152,13 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       // Who is talking, so cues to Iris can wait for a pause (see queueCue).
       if (event === 'participant-speech-start') resident.speaking.add(body.CallSid);
       else resident.speaking.delete(body.CallSid);
+      // One short line per event (instead of the raw webhook) to see what Twilio reports.
+      const nameOf = (sid) => (sid === residentCallSid ? 'resident'
+        : sid === resident.agent.callSid ? 'Iris'
+          : t && t.winner !== null && t.techs[t.winner].callSid === sid ? 'technician'
+            : `call ${String(sid).slice(0, 8)}…`);
+      const talking = [...resident.speaking].map(nameOf).join(', ') || 'nobody';
+      log(`SPEECH ${nameOf(body.CallSid)} ${event === 'participant-speech-start' ? 'started' : 'stopped'} talking (talking now: ${talking})${resident.cueQueue.length ? ` [${resident.cueQueue.length} cue(s) waiting]` : ''}`);
       pumpCues(residentCallSid);
     } else if (event === 'participant-leave') {
       const who = whoIs(residentCallSid, resident, t, body);

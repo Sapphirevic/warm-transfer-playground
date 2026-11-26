@@ -1683,3 +1683,19 @@ test('cue pause: "no technician" waits for a pause too, replaces a waiting updat
   assert.deepEqual(cueKinds(s), ['unavailable'], 'only "No technician is available"');
   assert.equal(s.logs.filter((line) => line.includes('participant-speech')).length, 0, 'talking events are not logged as webhooks');
 });
+
+test('cue pause: each talking start/stop is logged as one SPEECH line naming who', async (t) => {
+  const s = await setup({ cueQuietGapMs: 40, cueMaxWaitMs: 5000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+  await s.room('participant-speech-start', { CallSid: RESIDENT });
+  await s.tech(0).status('no-answer'); // an update now waits
+  await s.room('participant-speech-start', { CallSid: iris });
+  await s.room('participant-speech-stop', { CallSid: RESIDENT });
+  const lines = s.logs.filter((line) => line.includes(' SPEECH '));
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /SPEECH resident started talking \(talking now: resident\)$/);
+  assert.match(lines[1], /SPEECH Iris started talking \(talking now: resident, Iris\) \[1 cue\(s\) waiting\]$/);
+  assert.match(lines[2], /SPEECH resident stopped talking \(talking now: Iris\) \[1 cue\(s\) waiting\]$/);
+});
