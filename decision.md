@@ -30,7 +30,13 @@ What changed:
 
 Checks:
 - 61/61 tests pass, including a new one: `branch_id` is sent inside `conversation_initiation_client_data`, not at the top level, and is left out when empty.
-- Not yet checked on a real call: that ElevenLabs actually honours `branch_id` on register-call. The docs list the field in its schema, but no example covers telephony. The ElevenLabs conversation page shows which branch ran.
+
+**Result on real calls (2026-11-26): branches are not used for phone calls; a separate agent is.**
+- With `ELEVENLABS_BRANCH_ID` set to the "Sequential Testing - Victoria" branch, phone call `CA9ee730…d622` (13:24 UTC) still never called `request_transfer`.
+- In the dashboard Preview on that same branch (v4), Iris called `request_transfer` on her first turn. The request reached this server with the correct URL and secret. The 404 was expected: Preview sends a placeholder `call_sid`.
+- So the branch was fine, and phone calls started through register-call did not run it, despite `branch_id`.
+- Fix used: **duplicate the agent** into a separate agent, put its ID in `ELEVENLABS_AGENT_ID`, and leave `ELEVENLABS_BRANCH_ID` empty. The setting stays in the code (harmless when empty) in case ElevenLabs supports it later.
+- Also learned: Preview needs a placeholder for `call_sid` under **Vars**, or the conversation fails with "Missing required dynamic variables in tools: {'call_sid'}". Real calls always send it.
 
 ### 2026-11-26 - every call is an emergency (prompt only)
 
