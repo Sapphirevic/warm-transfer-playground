@@ -76,6 +76,9 @@ function buildReport(t) {
     agent_mute_periods: periods(t.mutePeriods),
     // The technician on hold while Iris finished her sentence (D30): proof she was not cut off.
     technician_hold_periods: periods(t.techHoldPeriods || []),
+    // 'iris': Iris handed over in her own words and 'A technician has joined the call' went to
+    // her leg only (D32). 'room announcement': the whole room heard it (no Iris, or older calls).
+    handoff_by: t.handoffBy || null,
     // Each time a technician did not take the call and the next one was called, Iris was
     // cued to tell the resident. `cue` is what Iris heard; the resident heard Iris's reply.
     // Messages Iris took for the maintenance team with the take_message tool.
@@ -112,6 +115,8 @@ function buildReport(t) {
       outcome_at: iso(tech.outcomeAt),
       // Exactly what this technician heard before "Press 1" (null if they never answered).
       briefing: tech.briefing || null,
+      // The last brief the technician heard to the end; one cut short by pressing 1 does not count (D32).
+      briefing_heard_in_full: tech.heardBriefing || null,
       // Newer progress read to them when they pressed 1, before joining (null if none).
       update_on_accept: tech.acceptUpdate || null,
       line_closed_at: iso(tech.endedAt),
@@ -386,13 +391,16 @@ function renderTranscript(r) {
   //  - the room announcement "A technician has joined the call." in Twilio's voice
   // Speech recognition may write numbers as words and may merge the caller's own words
   // into the same line, so the match is loose and any extra words are flagged.
-  const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?|the technician has left the call\.?(\s*please speak to the caller again\.?)?/i;
+  const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?|the technician has left the call\.?(\s*please speak to the caller again\.?)?|technician here\.?(\s*hand over in one sentence\.?)?/i;
   const ROOM_ANNOUNCEMENT = /a technician has joined the call\.?/i;
   const extraWords = (text, re) => /[a-z]/i.test(text.replace(re, ''));
   const serverLine = (row) => {
     if (row.role !== 'user') return null;
     if (CUE_TO_IRIS.test(row.text)) {
       return { cls: 'cue', label: extraWords(row.text, CUE_TO_IRIS) ? 'Cue to Iris only, plus the caller' : 'Cue to Iris only (resident did not hear it)' };
+    }
+    if (ROOM_ANNOUNCEMENT.test(row.text) && r.handoff_by === 'iris') {
+      return { cls: 'cue', label: extraWords(row.text, ROOM_ANNOUNCEMENT) ? 'Cue to Iris only, plus the caller' : 'Cue to Iris only (resident did not hear it)' };
     }
     if (ROOM_ANNOUNCEMENT.test(row.text)) {
       return { cls: 'announcement', label: extraWords(row.text, ROOM_ANNOUNCEMENT) ? 'Room announcement (Twilio), plus the caller' : 'Room announcement (Twilio)' };
@@ -439,7 +447,7 @@ ${body.join('\n')}
 // Server lines that can show up in a live transcript. The room announcement is heard by
 // everyone; the cues are played to Iris's leg only.
 const ROOM_JOINED_LINE = /a technician has joined the call/i;
-const CUE_TO_IRIS_LINE = /technician \w+ did not pick up|no technician is available right now|the technician has left the call/i;
+const CUE_TO_IRIS_LINE = /technician \w+ did not pick up|no technician is available right now|the technician has left the call|technician here\.? hand over/i;
 
 const recordingRank = (rec) => ({ room: 0, resident: 1, technician: 2 })[rec.kind] ?? 3;
 
@@ -500,7 +508,7 @@ function liveSpeaker(r, row) {
   if (row.leg === 'iris') {
     if (outbound) return within(r.agent_mute_periods, row.at) ? 'Iris (muted, not heard)' : 'Iris';
     if (!inbound) return 'Unknown track';
-    if (CUE_TO_IRIS_LINE.test(row.text)) return 'Cue to Iris only (resident did not hear it)';
+    if (CUE_TO_IRIS_LINE.test(row.text) || (r.handoff_by === 'iris' && ROOM_JOINED_LINE.test(row.text))) return 'Cue to Iris only (resident did not hear it)';
     if (ROOM_JOINED_LINE.test(row.text)) return 'Room announcement (Twilio)';
     return techInRoom(row.at) ? 'Resident or technician' : 'Resident';
   }

@@ -19,7 +19,7 @@ const OWN_CHANNEL = 1;
 // ElevenLabs' own tools. They are not the transfer request, so they cannot be used to line up the clocks.
 const SYSTEM_TOOLS = /called (skip_turn|end_call|language_detection|transfer_to_number|transfer_to_agent|play_keypad_touch_tone|voicemail_detection)\b/;
 // Lines Iris hears that are the server's, not a person's.
-const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?|the technician has left the call\.?(\s*please speak to the caller again\.?)?/i;
+const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?|the technician has left the call\.?(\s*please speak to the caller again\.?)?|technician here\.?(\s*hand over in one sentence\.?)?/i;
 const ROOM_ANNOUNCEMENT = /a technician has joined the call\.?/i;
 
 const MATCH_WINDOW_MS = 15_000; // how far apart in time an ElevenLabs line and a Twilio line may be
@@ -140,7 +140,8 @@ function serverRows(r) {
   const winnerIndex = (r.technicians || []).findIndex((tech) => tech.outcome === 'accepted');
   if (r.result === 'connected' && r.finished_at) {
     event(r.finished_at, `Technician ${winnerIndex + 1} joined the call`);
-    add(r.finished_at, { kind: 'line', speaker: 'Twilio (room announcement, everyone hears it)', text: 'A technician has joined the call.', textFrom: 'server (exact)' });
+    if (r.handoff_by === 'iris') event(r.finished_at, 'Technician on hold until Iris finished; then Iris handed over (D32)');
+    else add(r.finished_at, { kind: 'line', speaker: 'Twilio (room announcement, everyone hears it)', text: 'A technician has joined the call.', textFrom: 'server (exact)' });
     const left = winnerIndex >= 0 && r.technicians[winnerIndex].line_closed_at;
     if (left) event(left, `Technician ${winnerIndex + 1} left the call`);
   }

@@ -106,9 +106,11 @@ function loadConfig(env = process.env) {
     // When a technician joins, they wait on hold until Iris has finished talking (D30). This is
     // only a safety net in case Twilio never reports that she stopped.
     handoverMaxWaitMs: Number(env.HANDOVER_MAX_WAIT_MS) > 0 ? Number(env.HANDOVER_MAX_WAIT_MS) : 30000,
-    // After Iris is told to wrap up (D31), how long to wait for her to start replying before
-    // handing over anyway.
+    // After Iris is cued to introduce the technician (D32), how long to wait for her to start
+    // before handing over anyway (counted from when Twilio has finished saying the cue).
     handoverWrapUpWaitMs: Number(env.HANDOVER_WRAPUP_WAIT_MS) > 0 ? Number(env.HANDOVER_WRAPUP_WAIT_MS) : 6000,
+    // Roughly how long Twilio's voice takes per word, to know when a cue to Iris has finished.
+    speechMsPerWord: 380,
     // If Iris is quiet when the technician joins, wait this long first in case she is just
     // starting a sentence Twilio has not reported yet (D27).
     handoverGraceMs: Number(env.HANDOVER_GRACE_MS) >= 0 && env.HANDOVER_GRACE_MS !== undefined && env.HANDOVER_GRACE_MS !== '' ? Number(env.HANDOVER_GRACE_MS) : 1500,

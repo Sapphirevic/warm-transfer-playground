@@ -16,7 +16,37 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
-### 2026-11-26 - Iris is told to wrap up when the technician presses 1 (v0.11.0)
+### 2026-11-26 - Iris hands over in her own words; the brief can't be cut short (v0.12.0)
+
+**D32. One announcement only: Iris's handover sentence. The technician hears the whole brief before "Press 1". This replaces D31 (the press-1 wrap-up cue).**
+
+Call `CAcac6…cf22` (17:11 UTC), as reported by Victoria: "Iris did not wrap up", "it kept disconnecting sort of", "the tech did not get a brief on the troubleshoot so far", "there was not a proper handoff". Checked against the server log, the report and the ElevenLabs transcript:
+- **Brief.** The technician answered 12.0 s after Iris asked for one, before her first progress (20.7 s). The repeat of the brief did include the progress, but they pressed 1 about 2 s into it. The server counted that brief as heard, so it skipped the progress update on accepting.
+- **Wrap-up.** The D31 cue waited 10.2 s for a pause; the resident's line counted as talking the whole time. It then went out while Iris was talking and cut her off. It was long (about 10 s spoken), and the server took her cut-off sentence as her wrap-up, so she was muted before she said "The technician has joined the call now".
+- **"Disconnecting".** The technician waited on hold 14.1 s in silence, the resident heard Iris stop mid-sentence and then nothing, and the brief was followed by 6 s of silence and a repeat.
+- **Handoff.** The technician never heard Iris; the only bridge was Twilio's "A technician has joined the call".
+
+Decided with Victoria: Iris hands over, with a short pause (about 2 s), instead of Twilio's announcement. "Iris is not supposed to give the whole brief again, the tech already knows the brief." "Ensure the tech gets a clear brief with no interruptions."
+
+The flow now:
+- **Technician.**
+  - The whole brief (summary plus progress so far), outside the key-press step, so pressing a key can't cut it short. Then "Press 1 to connect to the resident".
+  - On pressing 1: only progress newer than the brief ("Update: …"), then "Connecting you to the resident".
+  - Joins muted. Waits on hold ("One moment please", then silence) only while Iris finishes her sentence: until she has been quiet for 1.5 s (D30).
+  - Comes off hold, still muted, and hears Iris hand over. Then unmuted.
+- **Iris** hears "Technician here. Hand over in one sentence." (her leg only, about 2 s; she is quiet, so it can't cut her off). She says one handover sentence that both people hear, and doesn't repeat the brief.
+- **Then:** Iris muted, technician unmuted, and Iris alone hears "A technician has joined the call", her prompt's cue to stay silent. If she doesn't start within `HANDOVER_WRAPUP_WAIT_MS` (6 s) of the cue ending, this happens anyway.
+- **No Twilio announcement to the room** when Iris is there. With no Iris, the technician is unmuted at once and the room hears "A technician has joined the call".
+- **A sentence Iris started before the cue had finished** (estimated at 380 ms a word) is not taken as her handover.
+- **Report:** `handoff_by` ('iris' or 'room announcement'), `briefing_heard_in_full`. When Iris hands over, "A technician has joined the call" is labelled "Cue to Iris only".
+- **Removed:** the D31 press-1 cue and its states.
+
+Checks:
+- 96/96 tests (one run, as asked). 6 new tests: the full handoff order, Iris not replying, a sentence that started too early, report labels, the brief before "Press 1", and newer progress on pressing 1.
+- Two real reports (`CAcac6…`, `CAd7d4…`) re-rendered with the new code: both pages build and both still show "One at a time: yes".
+- Not yet heard on a real call.
+
+### 2026-11-26 - Iris is told to wrap up when the technician presses 1 (v0.11.0) - replaced by D32
 
 **D31. At press 1, Iris gets a cue (her leg only): "A technician has accepted and is joining the call now. Finish your point in a few words, tell the caller the technician is joining, and do not ask a new question." The room hears "A technician has joined the call" only after she has said that and finished.**
 
@@ -560,3 +590,4 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-26 | D29 technician-left cue | (1) `npm test` 3 runs, (2) real report CAd7d4…7cde5 re-rendered, (3) 3 deliberate breaks, then restored | 88/88 pass each run. "Hello? Hello?" relabelled "Resident" in both tabs. Each break fails 1-3 tests; code restored byte-identical |
 | 2026-11-26 | D30 technician on hold until Iris finishes | (1) `npm test` 3 runs, (2) 3 deliberate breaks, then restored, (3) Twilio library participant update params and Conference TwiML checked | 90/90 pass each run. Breaks fail 6, 2 and 1 tests; code restored byte-identical. Library sends Muted/Hold/HoldUrl/HoldMethod together; muted="true" renders |
 | 2026-11-26 | D31 wrap-up cue at press 1 | (1) `npm test` 3 runs, (2) 1 deliberate break, then restored from backup (2 more stopped on request), (3) - | 95/95 pass each run. Break (no cue): 18 tests fail |
+| 2026-11-26 | D32 Iris hands over; brief before "Press 1" | (1) `npm test` once, (2) 2 real reports re-rendered, (3) the TwiML in the tests is made by the real Twilio library | 96/96 pass. Both real pages build and still show one at a time |
