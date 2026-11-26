@@ -88,6 +88,8 @@ function buildReport(t) {
       // When the cue was actually played to Iris: it waits for a pause in the talking (D23).
       cued_at: iso(u.cuedAt),
       waited_for_pause_seconds: u.cuedAt ? Math.round((u.cuedAt - u.at) / 100) / 10 : null,
+      // 'tool reply' (in Iris's update_transfer reply, D26) or 'audio cue' (fallback / hold music)
+      delivered_via: u.via || null,
     })),
     // Filled in from ElevenLabs after the call (see buildTranscript).
     transcript: t.transcript || null,
@@ -104,6 +106,8 @@ function buildReport(t) {
       outcome_at: iso(tech.outcomeAt),
       // Exactly what this technician heard before "Press 1" (null if they never answered).
       briefing: tech.briefing || null,
+      // Newer progress read to them when they pressed 1, before joining (null if none).
+      update_on_accept: tech.acceptUpdate || null,
       line_closed_at: iso(tech.endedAt),
       seconds_from_tool_call: {
         dialled: after(tech.dialledAt),

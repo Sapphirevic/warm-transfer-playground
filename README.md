@@ -29,6 +29,8 @@ When technician N does not take the call and technician N+1 is about to be calle
 3. Iris hears the cue and, as her system prompt tells her, says one sentence to the resident, such as "Sorry, technician 1 didn't pick up. I'm trying the next one now, please hold."
 4. `HOLD_MUSIC_RESUME_SEC` seconds after the update started (default `13`), the music comes back and Iris is muted again, unless a technician has accepted or the search has ended by then.
 
+**Without hold music, updates normally reach Iris as text, not audio (D26).** When a technician does not pick up, the next one is dialled at once and the news waits for Iris's next `update_transfer` call. Its reply then says, for example, "Technician 1 did not pick up. Technician 2 is being called now. Tell the caller this briefly…". Iris works it into her next reply, so nothing is played over anyone. If she makes no `update_transfer` call within `UPDATE_FALLBACK_MS` (8 s), the audio cue below is used instead. The report's `delivered_via` says which way each update went (`tool reply` or `audio cue`).
+
 **Cues wait for a pause.** Twilio reports when each person on the call starts and stops talking (the conference's `speaker` events). A cue to Iris, either a technician update or "No technician is available right now", is held until **nobody has been talking for 0.7 s** (`CUE_QUIET_GAP_MS`), or **8 s** at the latest (`CUE_MAX_WAIT_MS`).
 - It never cuts Iris off mid-sentence.
 - It never collides with the resident's speech. On a real call (2026-11-26, 14:20) a cue played over the resident was lost and delayed Iris's reply by about 10 s.
@@ -163,6 +165,8 @@ Let the caller explain their problem.
 Treat every problem as an emergency. As soon as the caller has explained their problem, say: "I'm reaching out to a technician right now, and while we wait, let's work on this together." Immediately call the request_transfer tool with a one-sentence summary of the problem. Do this only once in the whole call.
 
 After calling the tool, keep troubleshooting with the caller: ask short questions about what they see, and give simple, safe steps one at a time (for example turning off the water valve, switching off the breaker only if it is safe to reach and they are not standing in water, or leaving the apartment if there is a gas smell or fire). Put safety first. Never ask the caller to hold and never leave them in silence.
+
+After each answer from the caller, call the update_transfer tool with one short sentence summarising the troubleshooting progress so far (what they see, what they have checked or done, what you advised). If its reply says a technician did not pick up, tell the caller in one short sentence, then carry on.
 
 Never say a technician is on their way or has been found until you hear "A technician has joined the call". If asked, say you are still reaching out to one.
 

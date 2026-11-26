@@ -595,21 +595,56 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     clearTimeout(t.holdTimer); // the music must not start while she is speaking
     t.holdTimer = null;
     const at = Date.now();
-    t.residentUpdates.push({ tech: i, at });
+    const update = { tech: i, at, cuedAt: null, via: null, fallbackTimer: null };
+    t.residentUpdates.push(update);
     saveReport(t);
-
     log(`UPDATE technician ${i + 1} did not take the call, Iris tells the resident +${secs(t.startedAt, at)} after tool call`);
-    const update = t.residentUpdates[t.residentUpdates.length - 1];
-    // Everything that belongs with the cue happens when it is actually sent (after a pause):
-    // Iris's voice back, music off, and the music-back timer counted from there.
-    queueCue(t.residentCallSid, `kind=tech-update&tech=${i}`, techUpdateLine(i), (sent) => {
+
+    // The audio cue: everything that belongs with it happens when it is actually sent
+    // (after a pause): Iris's voice back, music off, and the music-back timer.
+    const sendAudioCue = () => queueCue(t.residentCallSid, `kind=tech-update&tech=${i}`, techUpdateLine(i), (sent) => {
       update.cuedAt = Date.now();
+      update.via = 'audio cue';
       saveReport(t);
       if (!sent || t.status !== 'searching') return;
       setAgentMuted(t.residentCallSid, false, `telling the resident technician ${i + 1} did not pick up`);
       endHold(t, `Iris is telling the resident technician ${i + 1} did not pick up`);
       if (config.holdDelayMs !== null) scheduleHold(t, config.holdResumeMs);
     });
+
+    // With hold music the resident cannot hear Iris until she is unmuted, so the cue goes now.
+    if (config.holdDelayMs !== null) return sendAudioCue();
+
+    // Without hold music (D26): the news goes to Iris in her next update_transfer reply, as
+    // text, so nothing is played over anyone. Only if she makes no such call within
+    // UPDATE_FALLBACK_MS is the audio cue used.
+    update.fallbackTimer = setTimeout(() => {
+      update.fallbackTimer = null;
+      if (update.cuedAt || t.status !== 'searching') return;
+      log(`UPDATE no update_transfer call within ${config.updateFallbackMs} ms: using the audio cue for technician ${i + 1}`);
+      sendAudioCue();
+    }, config.updateFallbackMs);
+  }
+
+  // Search news Iris has not been told yet, for the update_transfer reply (D26). Marks it
+  // delivered and cancels its audio-cue fallback. Returns the status text for Iris.
+  function statusForIris(t) {
+    if (t.status !== 'searching') return null;
+    const news = t.residentUpdates.filter((u) => !u.cuedAt);
+    const calling = `Technician ${t.cursor + 1} is being called now.`;
+    if (!news.length) return `No change: technician ${t.cursor + 1} is still being called. Do not mention it; keep troubleshooting.`;
+    const now = Date.now();
+    for (const u of news) {
+      clearTimeout(u.fallbackTimer);
+      u.fallbackTimer = null;
+      u.cuedAt = now;
+      u.via = 'tool reply';
+    }
+    dropCues(t.residentCallSid, 'news given in the update_transfer reply instead');
+    saveReport(t);
+    const failed = news.map((u) => `Technician ${u.tech + 1} did not pick up.`).join(' ');
+    log(`UPDATE told Iris in the update_transfer reply: "${failed} ${calling}"`);
+    return `${failed} ${calling} Tell the caller this briefly in one sentence, then carry on troubleshooting.`;
   }
 
   // ---------------------------------------------------------------- technician calls
@@ -947,7 +982,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
         `If you hear "${ANNOUNCEMENTS.unavailable}", the search is over: apologise and offer to take a message${holdDelayMs === null ? '' : ' (the resident can hear you again; stop calling skip_turn)'}. ` +
         'If they give one, call the take_message tool with it, then tell them it is saved for the maintenance team, and keep replying to them until they are done. ' +
         'While troubleshooting, each time you learn something the technician should know (what the resident sees, what they have checked or done, what you advised), ' +
-        'call the update_transfer tool with one short sentence summarising the progress so far. The technician hears the latest one when they answer.',
+        'call the update_transfer tool with one short sentence summarising the progress so far. The technician hears the latest one when they answer. ' +
+        'Call it after each answer from the caller: its reply also tells you if a technician did not pick up, and then you tell the caller in one short sentence.',
     });
     setImmediate(() => startSearch(t));
     // Give Iris time to say "please hold" before the music replaces her.
@@ -991,7 +1027,8 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     t.progressUpdates.push({ text, at: Date.now(), used: true });
     saveReport(t);
     log(`PROGRESS resident=${callSid} +${secs(t.startedAt, Date.now())} after tool call: ${JSON.stringify(text)}`);
-    res.json({ status: 'noted', message: 'Saved for the technician brief. Keep troubleshooting with the caller.' });
+    const status = statusForIris(t);
+    res.json({ status: 'noted', message: `Saved for the technician brief. ${status || 'Keep troubleshooting with the caller.'}` });
   });
 
   // Iris took a message for the maintenance team (usually after "No technician is
@@ -1132,9 +1169,20 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     // Straight away: stop every other technician's phone.
     cancelTechs(t, { except: i, why: 'another technician accepted' });
 
+    // Progress Iris reported after this technician's brief is read to them now, before
+    // they join, so they always arrive with the latest context (D26).
+    let say = TECH_ANNOUNCEMENT;
+    if (t.progress && !(tech.briefing || '').includes(t.progress)) {
+      const latest = /[.!?]$/.test(t.progress) ? t.progress : `${t.progress}.`;
+      say = `Update: ${latest} ${TECH_ANNOUNCEMENT}`;
+      tech.acceptUpdate = latest;
+      log(`BRIEF tech#${i} update on accepting: "${latest}"`);
+      saveReport(t);
+    }
+
     // The technician joins the room where the resident and Iris already are. Nobody is
     // moved, so Iris stays. The technician leaving does not end the call for the others.
-    sendTwiml(res, conferenceTwiml(t.residentCallSid, { say: TECH_ANNOUNCEMENT, endConferenceOnExit: false }));
+    sendTwiml(res, conferenceTwiml(t.residentCallSid, { say, endConferenceOnExit: false }));
   });
 
   // Status callbacks for technician calls: ringing, answered, and how the call ended.

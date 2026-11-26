@@ -95,7 +95,10 @@ function loadConfig(env = process.env) {
     // ...but never longer than this before they are sent anyway.
     cueMaxWaitMs: Number(env.CUE_MAX_WAIT_MS) > 0 ? Number(env.CUE_MAX_WAIT_MS) : 8000,
     // When a technician joins mid-sentence, Iris is muted once she stops talking, but no later than this.
-    handoverMaxWaitMs: Number(env.HANDOVER_MAX_WAIT_MS) > 0 ? Number(env.HANDOVER_MAX_WAIT_MS) : 6000,
+    handoverMaxWaitMs: Number(env.HANDOVER_MAX_WAIT_MS) > 0 ? Number(env.HANDOVER_MAX_WAIT_MS) : 10000,
+    // Technician updates reach Iris in her next update_transfer reply; if she makes no such
+    // call within this long, the audio cue is used instead (D26).
+    updateFallbackMs: Number(env.UPDATE_FALLBACK_MS) >= 0 && env.UPDATE_FALLBACK_MS !== undefined && env.UPDATE_FALLBACK_MS !== '' ? Number(env.UPDATE_FALLBACK_MS) : 8000,
     holdMusicUrl: (env.HOLD_MUSIC_URL || 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical').trim(),
     // After a call ends, when to ask ElevenLabs for the transcript (it takes a moment to be ready).
     transcriptRetryMs: [5_000, 20_000, 60_000],

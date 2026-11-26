@@ -15,6 +15,27 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - a cleaner flow: updates as text, update on accepting, longer handover (v0.8.0)
+
+**D26. Technician updates go to Iris in her `update_transfer` reply, with the audio cue only as a fallback.**
+
+The SPEECH log of call `CA386366…92b9f3` (15:14 UTC) showed the room was never silent between a technician failing (15:15:00) and the cue (15:15:08). Iris and the resident overlap constantly, and Iris talked almost without a break from 15:15:12 to 15:15:28. Any audio cue lands on someone: "Calling technician to now. Yeah." garbled the resident's turn, and Iris's reply was cut.
+
+What changed:
+- **Without hold music,** the news is held and delivered as text in Iris's next `update_transfer` reply: "Technician N did not pick up. Technician N+1 is being called now. Tell the caller this briefly…". Several failures are told together, and each only once. With no news, the reply says "No change… do not mention it."
+- **Fallback:** the audio cue (with the D23 pause rule) is used only if she makes no such call within `UPDATE_FALLBACK_MS` (8 s), or immediately when hold music is on.
+- **The `request_transfer` reply and the README prompt** ask her to call `update_transfer` after each caller answer.
+- **The report** records `delivered_via` (tool reply or audio cue).
+
+**On pressing 1, the technician hears newer progress before joining.** On the same call, technician 2 answered at +20.2 s and Iris's progress arrived at +23 s, so his brief lacked it. If progress newer than the technician's brief exists, they now hear "Update: <progress>. Connecting you to the resident." The report adds `update_on_accept`.
+
+**Handover wait raised from 6 s to 10 s.** On that call Iris's last reply started at 15:15:23 and was cut at the 6 s limit.
+
+Checks:
+- 78/78 tests, 3 runs. 6 new tests cover: news in the reply (only once), two failures told together, fallback cue, an accept cancelling the fallback, the update on accepting (and none when already in the brief), and the defaults.
+- Broken on purpose: no news in the reply fails 2 tests; always using the audio cue fails 4; no update on accepting fails 1.
+- Older tests run with `updateFallbackMs: 0`, which reproduces the earlier always-cue behaviour, and all still pass.
+
 ### 2026-11-26 - progress in the technician brief, Iris finishes her sentence (v0.7.0)
 
 **D24. The technician brief includes Iris's troubleshooting progress.**

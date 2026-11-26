@@ -31,7 +31,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 // holdDelayMs: null = no hold music (most tests), a number = music starts that long after the tool call.
 // holdResumeMs: how long after a "technician did not pick up" update the music comes back.
-async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000 } = {}) {
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0 } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const agentLegs = []; //      conferences(sid).participants.create(...) -> Iris joining
@@ -126,6 +126,7 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
     cueQuietGapMs,
     cueMaxWaitMs,
     handoverMaxWaitMs,
+    updateFallbackMs,
     holdMusicUrl: 'http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical',
     transcriptRetryMs: [5],
     reportsDir: path.join(tmp, 'reports'),
@@ -1802,4 +1803,98 @@ test('handover: if Iris keeps talking, she is muted after the maximum wait; if s
   await quiet.residentAsksForTransfer();
   await quiet.techAcceptsAndJoins(0);
   assert.deepEqual(quiet.roomActions, ['mute:true', 'announce:joined'], 'Iris not talking: immediate, as before');
+});
+
+// ---------------------------------------------------------------- updates via the update_transfer reply (D26)
+
+test('update via tool reply: technician news reaches Iris in her next update_transfer reply, with no audio cue', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], updateFallbackMs: 5000 });
+  t.after(s.close);
+  const reply = await s.residentAsksForTransfer();
+  assert.match(reply.body.message, /Call it after each answer from the caller: its reply also tells you if a technician did not pick up/);
+
+  const quiet = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Fan is dead' });
+  assert.match(quiet.body.message, /No change: technician 1 is still being called\. Do not mention it/);
+
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.agentCues, [], 'no audio cue: it waits for the tool reply');
+  assert.equal(s.techCalls().length, 2, 'next technician dialled at once');
+
+  const news = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Fan is dead; outlet works' });
+  assert.match(news.body.message, /Technician 1 did not pick up\. Technician 2 is being called now\. Tell the caller this briefly in one sentence/);
+  const again = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Still dead' });
+  assert.match(again.body.message, /No change: technician 2 is still being called/, 'told only once');
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(s.agentCues, [], 'the fallback cue never plays once the news was given');
+  const u = s.report().resident_updates[0];
+  assert.equal(u.delivered_via, 'tool reply');
+  assert.ok(u.cued_at);
+  assert.ok(s.logs.some((line) => line.includes('UPDATE told Iris in the update_transfer reply: "Technician 1 did not pick up. Technician 2 is being called now."')));
+});
+
+test('update via tool reply: two technicians failing before her next call are told together', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], updateFallbackMs: 5000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.tech(0).status('busy');
+  await tick();
+  await s.tech(1).status('no-answer');
+  await tick();
+  const news = await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'x' });
+  assert.match(news.body.message, /Technician 1 did not pick up\. Technician 2 did not pick up\. Technician 3 is being called now\./);
+});
+
+test('update fallback: with no update_transfer call in time, the audio cue is used', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002', '+15550000003'], updateFallbackMs: 80 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.tech(0).status('no-answer');
+  await tick();
+  assert.deepEqual(s.agentCues, []);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(s.agentCues.map((c) => new URL(c.announceUrl).searchParams.get('kind')), ['tech-update']);
+  assert.equal(s.report().resident_updates[0].delivered_via, 'audio cue');
+  assert.ok(s.logs.some((line) => line.includes('UPDATE no update_transfer call within 80 ms: using the audio cue')));
+});
+
+test('update fallback: a technician accepting before the fallback means no cue at all', async (t) => {
+  const s = await setup({ techNumbers: ['+15550000001', '+15550000002'], updateFallbackMs: 100 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.tech(0).status('no-answer');
+  await s.techAcceptsAndJoins(1);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.deepEqual(s.agentCues, []);
+});
+
+test('accept: progress reported after the brief is read to the technician when they press 1', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.tech(0).answered(); // brief without progress
+  await s.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Standing fan is completely dead' });
+  const accept = await s.tech(0).press('1');
+  assert.match(accept.text, /<Say>Update: Standing fan is completely dead\. Connecting you to the resident\.<\/Say>/);
+  assert.equal(s.report().technicians[0].update_on_accept, 'Standing fan is completely dead.');
+  assert.ok(s.logs.some((line) => line.includes('BRIEF tech#0 update on accepting: "Standing fan is completely dead."')));
+
+  // Already in the brief: no repeat.
+  const other = await setup();
+  t.after(other.close);
+  await other.residentAsksForTransfer();
+  await other.json('/tool/update-transfer', { call_sid: RESIDENT, progress: 'Valve closed' });
+  await other.tech(0).answered();
+  const plain = await other.tech(0).press('1');
+  assert.match(plain.text, /<Say>Connecting you to the resident\.<\/Say>/);
+  assert.equal(other.report().technicians[0].update_on_accept, null);
+});
+
+test('handover: waits up to 10 s by default', () => {
+  const env = { TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'x', TWILIO_PHONE_NUMBER: TWILIO_NUMBER, ELEVENLABS_API_KEY: 'x', ELEVENLABS_AGENT_ID: 'agent_x', TECH_NUMBERS: '+15550000001', PUBLIC_BASE_URL: PUBLIC, TOOL_SECRET: 'x', TWILIO_AGENT_APP_SID: APP_SID };
+  const c = loadConfig(env);
+  assert.equal(c.handoverMaxWaitMs, 10_000);
+  assert.equal(c.updateFallbackMs, 8_000);
+  assert.equal(loadConfig({ ...env, UPDATE_FALLBACK_MS: '0' }).updateFallbackMs, 0);
 });
