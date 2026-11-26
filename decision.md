@@ -16,6 +16,32 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - the technician waits on hold until Iris has finished (v0.10.0)
+
+**D30. Iris is never cut off at the handover: the technician joins muted, waits on hold, and comes in only once Iris has been quiet for 1.5 s.**
+
+Requested: "when Iris is talking, put the tech on hold and make Iris finish her statement. Do not cut her off."
+
+Before this change:
+- The technician entered an open room and could talk at once. On call `CAd7d4…7cde5` they started talking 0.3 s after joining.
+- Iris was muted at her first speech-stop, so a pause inside her turn could end it.
+- After `HANDOVER_MAX_WAIT_MS` (10 s) she was muted even mid-sentence.
+
+What changed:
+- **Joins muted.** The technician's conference TwiML has `muted="true"`, so they can't be heard before the hold lands.
+- **On hold at once.** When the handover has to wait (Iris talking, or the 1.5 s grace), the technician is put on hold. They hear "One moment please", then silence (`/conference/tech-hold`), and the room doesn't hear them.
+- **Quiet for 1.5 s.** The handover happens only once Iris has been quiet for `HANDOVER_GRACE_MS` (1.5 s). A pause followed by more speech restarts the wait, so a pause between sentences no longer ends her turn.
+- **Then, in order:** Iris muted, technician off hold and unmuted (one Twilio update), hold music off if any, then "A technician has joined the call".
+- **Safety net raised.** `HANDOVER_MAX_WAIT_MS` goes from 10 s to **30 s**, and reaching it logs a `WARN`. It is only for Twilio never reporting that Iris stopped: the technician can't be left on hold forever, and if the events go missing the server can't know she is still talking.
+- **No Iris in the room:** no hold; the technician is unmuted at once.
+- **Report:** a new `technician_hold_periods` field shows when the technician was held and released.
+
+Checks:
+- 90/90 tests, 3 runs. 15 existing tests now expect the technician's hold and release steps. 2 new tests: the full sequence through a pause in Iris's turn, and the no-Iris case.
+- Broken on purpose 3 ways (no hold: 6 fail; hand over at the first pause: 2 fail; join unmuted: 1 fails). Code restored byte-identical.
+- The Twilio library (`participant.js`) sends `Muted`, `Hold`, `HoldUrl` and `HoldMethod` in one update, and TwiML `<Conference muted="true">` renders as expected.
+- Not yet heard on a real call.
+
 ### 2026-11-26 - Iris is told when the technician leaves (v0.9.1)
 
 **D29. A cue to Iris only, "The technician has left the call. Please speak to the caller again.", when the technician hangs up and the resident is still there.**
@@ -514,3 +540,4 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |
 | 2026-11-26 | D28 merge of full-call-recording | (1) `npm test` 3 runs, (2) config flags parsed with a dummy env, (3) 2 deliberate breaks of the recording code, then restored | 84/84 pass each run. Flags default on, turn off, bad value refused. Each break fails 1 test; code restored byte-identical |
 | 2026-11-26 | D29 technician-left cue | (1) `npm test` 3 runs, (2) real report CAd7d4…7cde5 re-rendered, (3) 3 deliberate breaks, then restored | 88/88 pass each run. "Hello? Hello?" relabelled "Resident" in both tabs. Each break fails 1-3 tests; code restored byte-identical |
+| 2026-11-26 | D30 technician on hold until Iris finishes | (1) `npm test` 3 runs, (2) 3 deliberate breaks, then restored, (3) Twilio library participant update params and Conference TwiML checked | 90/90 pass each run. Breaks fail 6, 2 and 1 tests; code restored byte-identical. Library sends Muted/Hold/HoldUrl/HoldMethod together; muted="true" renders |

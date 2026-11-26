@@ -74,6 +74,8 @@ function buildReport(t) {
     agent_muted_at: firstFrom(t.mutePeriods),
     agent_unmuted_at: lastTo(t.mutePeriods),
     agent_mute_periods: periods(t.mutePeriods),
+    // The technician on hold while Iris finished her sentence (D30): proof she was not cut off.
+    technician_hold_periods: periods(t.techHoldPeriods || []),
     // Each time a technician did not take the call and the next one was called, Iris was
     // cued to tell the resident. `cue` is what Iris heard; the resident heard Iris's reply.
     // Messages Iris took for the maintenance team with the take_message tool.

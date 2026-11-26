@@ -457,7 +457,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   // the resident is still with Iris, and if Iris drops the resident and technician carry on.
   // liveResident: also start the live transcription of the resident's line (the
   // technician's is started earlier, before their brief, see /tech/answered).
-  function conferenceTwiml(residentCallSid, { say, endConferenceOnExit, liveResident = false }) {
+  function conferenceTwiml(residentCallSid, { say, endConferenceOnExit, liveResident = false, muted = false }) {
     const callback = `${base}/conference/status?resident=${residentCallSid}`;
     const vr = new VoiceResponse();
     if (liveResident && liveTranscription) addLiveTranscription(vr, residentCallSid, 'resident');
@@ -466,6 +466,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       {
         startConferenceOnEnter: true,
         endConferenceOnExit,
+        ...(muted ? { muted: true } : {}),
         beep: false,
         // Silence instead of hold music for the second or two before Iris joins.
         waitUrl: '',
@@ -760,40 +761,123 @@ function createApp({ config, client, registerCall, conversations = null, logger 
   //    that Twilio has not reported yet (seen on a real call). If she starts, wait for her
   //    to finish; if not, hand over when the grace period ends;
   //  - never longer than HANDOVER_MAX_WAIT_MS in total.
-  // Order unchanged: Iris muted, hold music off, then the announcement.
+  //
+  // D30: Iris is never cut off. The technician joins muted and is put on hold at once, so
+  // they neither talk over her nor wait in an open room, and the handover happens only
+  // once she has been quiet for HANDOVER_GRACE_MS: a pause inside her turn followed by
+  // more speech keeps the technician waiting. HANDOVER_MAX_WAIT_MS (30 s) is only a safety
+  // net for Twilio never reporting that she stopped.
+  // Order: Iris muted, technician off hold and unmuted, hold music off, then the announcement.
   function handOver(residentCallSid, t) {
     const resident = residentCalls.get(residentCallSid);
     if (!resident) return;
+    const techSid = t.winner !== null ? t.techs[t.winner].callSid : null;
     let done = false;
+    let techHeld = false;
     const irisSid = resident.agent.callSid;
     const irisTalking = () => Boolean(irisSid && resident.speaking.has(irisSid));
-    const go = (why) => {
-      if (done) return;
-      done = true;
+    const clearTimers = () => {
       clearTimeout(resident.handoverTimer);
       clearTimeout(resident.handoverGraceTimer);
       resident.handoverTimer = null;
       resident.handoverGraceTimer = null;
+    };
+    const go = (why) => {
+      if (done) return;
+      done = true;
+      clearTimers();
       resident.pendingHandover = null;
       if (resident.ended) return;
-      if (why) log(`HANDOVER ${why}: muting Iris and announcing the technician`);
+      if (why) log(`HANDOVER ${why}: muting Iris, then bringing in the technician`);
       setAgentMuted(residentCallSid, true, 'technician joined');
+      releaseTechnician(residentCallSid, techSid, techHeld);
       endHold(t, 'technician joined');
       announce(residentCallSid, 'joined');
     };
+    // Hand over once Iris has been quiet for the grace period; any new sentence restarts it.
+    const whenQuiet = (why) => {
+      clearTimeout(resident.handoverGraceTimer);
+      resident.handoverGraceTimer = setTimeout(() => {
+        resident.handoverGraceTimer = null;
+        if (!irisTalking()) go(why);
+      }, config.handoverGraceMs);
+    };
     if (!irisSid || resident.agent.state !== 'in') return go(null); // no Iris to wait for
-    resident.pendingHandover = go;
-    resident.handoverTimer = setTimeout(() => go('waited the maximum time'), config.handoverMaxWaitMs);
+    const mustWait = irisTalking() || config.handoverGraceMs > 0;
+    if (mustWait && techSid) {
+      techHeld = true;
+      holdTechnician(residentCallSid, techSid);
+    }
+    resident.pendingHandover = {
+      // Called from /conference/status for Iris's speech events.
+      irisSpeech(started) {
+        if (started) {
+          clearTimeout(resident.handoverGraceTimer);
+          resident.handoverGraceTimer = null;
+          log('HANDOVER Iris is talking: the technician waits on hold until she finishes');
+        } else {
+          whenQuiet('Iris finished her sentence');
+        }
+      },
+      cancel(why) {
+        if (done) return;
+        done = true;
+        clearTimers();
+        resident.pendingHandover = null;
+        log(`HANDOVER cancelled: ${why}`);
+      },
+    };
+    resident.handoverTimer = setTimeout(() => {
+      log(`WARN HANDOVER Iris has not been quiet for ${config.handoverMaxWaitMs / 1000}s; handing over anyway so the technician is not left on hold`);
+      go('waited the maximum time');
+    }, config.handoverMaxWaitMs);
     if (irisTalking()) {
-      log('HANDOVER waiting for Iris to finish her sentence before muting her');
+      log('HANDOVER Iris is talking: the technician waits on hold until she finishes');
       return;
     }
-    resident.handoverGraceTimer = setTimeout(() => {
-      resident.handoverGraceTimer = null;
-      if (irisTalking()) log('HANDOVER Iris started a sentence: waiting for her to finish');
-      else go(config.handoverGraceMs ? 'Iris is quiet' : null);
-    }, config.handoverGraceMs);
+    if (!config.handoverGraceMs) return go(null);
+    whenQuiet('Iris is quiet');
   }
+
+  // The technician waits on hold while Iris finishes (D30): they hear "One moment please",
+  // then silence, and the room does not hear them.
+  function holdTechnician(residentCallSid, techSid) {
+    const resident = residentCalls.get(residentCallSid);
+    return inOrder(resident, async () => {
+      try {
+        await client.conferences(resident.conferenceSid).participants(techSid)
+          .update({ hold: true, holdUrl: `${base}/conference/tech-hold`, holdMethod: 'POST' });
+        log(`HOLD technician call=${techSid} on hold while Iris finishes`);
+        recordPeriod(residentCallSid, 'techHoldPeriods', true);
+      } catch (err) {
+        log(`ERROR could not put the technician on hold call=${techSid}: ${twilioError(err)}`);
+      }
+    });
+  }
+
+  // Off hold (if they were held) and unmuted: the technician can now hear and be heard.
+  function releaseTechnician(residentCallSid, techSid, wasHeld) {
+    const resident = residentCalls.get(residentCallSid);
+    if (!techSid) return Promise.resolve();
+    return inOrder(resident, async () => {
+      if (resident.ended || !resident.present.has(techSid)) return;
+      try {
+        await client.conferences(resident.conferenceSid).participants(techSid)
+          .update(wasHeld ? { hold: false, muted: false } : { muted: false });
+        log(`HOLD technician call=${techSid} ${wasHeld ? 'off hold and ' : ''}unmuted: connected to the resident`);
+        if (wasHeld) recordPeriod(residentCallSid, 'techHoldPeriods', false);
+      } catch (err) {
+        log(`ERROR could not bring in the technician call=${techSid}: ${twilioError(err)}`);
+      }
+    });
+  }
+
+  app.post('/conference/tech-hold', twilioHook, (req, res) => {
+    const vr = new VoiceResponse();
+    vr.say('One moment please.');
+    vr.pause({ length: 30 });
+    sendTwiml(res, vr);
+  });
 
   // Technician i did not take the call and technician i+1 is about to be called.
   // The cue goes to Iris's leg only: the resident never hears it, they hear Iris say it.
@@ -1035,6 +1119,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     if (!resident || resident.ended) return;
     resident.ended = true;
     dropCues(residentCallSid, 'resident gone');
+    if (resident.pendingHandover) resident.pendingHandover.cancel('the resident left');
     clearTimeout(resident.handoverTimer);
     clearTimeout(resident.handoverGraceTimer);
     resident.pendingHandover = null;
@@ -1178,6 +1263,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       holdTimer: null, //      pending "music on" (see scheduleHold)
       holdPeriods: [], //      [{ from, to }] resident on hold music
       mutePeriods: [], //      [{ from, to }] Iris muted
+      techHoldPeriods: [], //  [{ from, to }] technician on hold while Iris finished (D30)
       residentUpdates: [], //  [{ tech, at }] "technician N did not pick up" cues sent to Iris
       messages: [], //         [{ text, at }] messages Iris took with the take_message tool
       progress: null, //       latest troubleshooting progress (update_transfer), used in the brief
@@ -1421,7 +1507,9 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
     // The technician joins the room where the resident and Iris already are. Nobody is
     // moved, so Iris stays. The technician leaving does not end the call for the others.
-    sendTwiml(res, conferenceTwiml(t.residentCallSid, { say, endConferenceOnExit: false }));
+    // They join muted, so they cannot talk over Iris before the handover puts them on hold
+    // (D30); the handover unmutes them once she has finished.
+    sendTwiml(res, conferenceTwiml(t.residentCallSid, { say, endConferenceOnExit: false, muted: true }));
   });
 
   // Status callbacks for technician calls: ringing, answered, and how the call ended.
@@ -1527,9 +1615,10 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       // Who is talking, so cues to Iris can wait for a pause (see queueCue).
       if (event === 'participant-speech-start') resident.speaking.add(body.CallSid);
       else resident.speaking.delete(body.CallSid);
-      // Iris finished her sentence: a waiting handover can go ahead now (see handOver).
-      if (event === 'participant-speech-stop' && body.CallSid === resident.agent.callSid && resident.pendingHandover) {
-        resident.pendingHandover('Iris finished her sentence');
+      // A waiting handover follows Iris's speech: it goes ahead once she has been quiet
+      // for the grace period, and waits again if she carries on (see handOver, D30).
+      if (body.CallSid === resident.agent.callSid && resident.pendingHandover) {
+        resident.pendingHandover.irisSpeech(event === 'participant-speech-start');
       }
       // One short line per event (instead of the raw webhook) to see what Twilio reports.
       const nameOf = (sid) => (sid === residentCallSid ? 'resident'
@@ -1549,14 +1638,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
       if (who === 'agent') resident.agent.state = 'left';
       if (who === 'technician') {
         // Left before Iris finished her sentence: there is nobody to hand over to any more.
-        if (resident.pendingHandover) {
-          clearTimeout(resident.handoverTimer);
-          clearTimeout(resident.handoverGraceTimer);
-          resident.handoverTimer = null;
-          resident.handoverGraceTimer = null;
-          resident.pendingHandover = null;
-          log('HANDOVER cancelled: the technician left before Iris was muted');
-        }
+        if (resident.pendingHandover) resident.pendingHandover.cancel('the technician left before Iris was muted');
         // The resident is alone with Iris again, so she needs her voice back, and she
         // needs to be told: she has been silent (skip_turn) since the technician joined (D29).
         setAgentMuted(residentCallSid, false, 'technician left');

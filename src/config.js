@@ -103,8 +103,9 @@ function loadConfig(env = process.env) {
     cueQuietGapMs: Number(env.CUE_QUIET_GAP_MS) >= 0 && env.CUE_QUIET_GAP_MS !== undefined && env.CUE_QUIET_GAP_MS !== '' ? Number(env.CUE_QUIET_GAP_MS) : 700,
     // ...but never longer than this before they are sent anyway.
     cueMaxWaitMs: Number(env.CUE_MAX_WAIT_MS) > 0 ? Number(env.CUE_MAX_WAIT_MS) : 8000,
-    // When a technician joins mid-sentence, Iris is muted once she stops talking, but no later than this.
-    handoverMaxWaitMs: Number(env.HANDOVER_MAX_WAIT_MS) > 0 ? Number(env.HANDOVER_MAX_WAIT_MS) : 10000,
+    // When a technician joins, they wait on hold until Iris has finished talking (D30). This is
+    // only a safety net in case Twilio never reports that she stopped.
+    handoverMaxWaitMs: Number(env.HANDOVER_MAX_WAIT_MS) > 0 ? Number(env.HANDOVER_MAX_WAIT_MS) : 30000,
     // If Iris is quiet when the technician joins, wait this long first in case she is just
     // starting a sentence Twilio has not reported yet (D27).
     handoverGraceMs: Number(env.HANDOVER_GRACE_MS) >= 0 && env.HANDOVER_GRACE_MS !== undefined && env.HANDOVER_GRACE_MS !== '' ? Number(env.HANDOVER_GRACE_MS) : 1500,
