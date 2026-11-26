@@ -33,6 +33,10 @@ const TECH_ANNOUNCEMENT = 'Connecting you to the resident.';
 const ANNOUNCEMENTS = {
   joined: 'A technician has joined the call.',
   unavailable: 'No technician is available right now.',
+  // Cue to Iris only (D29): after "A technician has joined the call" her prompt keeps her
+  // silent (skip_turn), so without this she does not answer the resident once the technician
+  // has gone. Worded as an instruction so it works without a prompt change.
+  left: 'The technician has left the call. Please speak to the caller again.',
 };
 // Played to Iris's leg only (the resident does not hear it) when technician i (0-based)
 // did not take the call and another one is about to be called. Iris's prompt reacts to it.
@@ -1544,8 +1548,19 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
       if (who === 'agent') resident.agent.state = 'left';
       if (who === 'technician') {
-        // The resident is alone with Iris again, so she needs her voice back.
+        // Left before Iris finished her sentence: there is nobody to hand over to any more.
+        if (resident.pendingHandover) {
+          clearTimeout(resident.handoverTimer);
+          clearTimeout(resident.handoverGraceTimer);
+          resident.handoverTimer = null;
+          resident.handoverGraceTimer = null;
+          resident.pendingHandover = null;
+          log('HANDOVER cancelled: the technician left before Iris was muted');
+        }
+        // The resident is alone with Iris again, so she needs her voice back, and she
+        // needs to be told: she has been silent (skip_turn) since the technician joined (D29).
         setAgentMuted(residentCallSid, false, 'technician left');
+        if (resident.present.has(residentCallSid)) queueCue(residentCallSid, 'kind=left', ANNOUNCEMENTS.left);
       }
       if (who === 'resident') residentGone(residentCallSid, 'left the room');
       else endIfResidentAlone(residentCallSid);

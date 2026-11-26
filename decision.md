@@ -16,6 +16,33 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - Iris is told when the technician leaves (v0.9.1)
+
+**D29. A cue to Iris only, "The technician has left the call. Please speak to the caller again.", when the technician hangs up and the resident is still there.**
+
+Call `CAd7d4…7cde5` (16:31 UTC) was the first full run after the merge, and everything up to the handover worked:
+- Technician 1 failed after 18.7 s, and technician 2 was dialled 5 ms later.
+- Iris gave the update once, from the `update_transfer` reply.
+- The brief carried the progress, and newer progress was given on pressing 1.
+- Iris finished her sentence and was then muted.
+- All three recordings were made, and the live transcripts came through on every line.
+
+The problem came after the technician hung up, 11 s after joining:
+- The server unmuted Iris, but nothing told her the technician had gone.
+- She had been using `skip_turn` since "A technician has joined the call", as her prompt says, and kept doing so.
+- The resident said "Hello? Hello?" twice and got no answer (ElevenLabs transcript, 87 s and 92 s).
+
+What changed:
+- **The cue:** when the technician leaves and the resident is still in the room, Iris is unmuted, then gets this cue on her leg only, after a pause like the other cues. It is worded as an instruction, so no prompt change is needed.
+- **Handover cancelled:** if the technician leaves while the handover is still waiting for Iris's sentence to end, the handover is cancelled: no mute and no "A technician has joined" announcement.
+- **Report labels:** in the ElevenLabs and merged tabs, caller lines after the technician's line closed are labelled "Resident", not "Resident or technician". The cue is labelled "Cue to Iris only".
+
+Checks:
+- 88/88 tests, 3 runs. 4 new tests: the cue and its order, the handover cancelled, no cue once the resident has gone, and the labels.
+- The real report re-rendered: "Hello? Hello?" is now "Resident" in both tabs.
+- Broken on purpose 3 ways (no cue: 3 tests fail; no handover cancel: 1 fails; old label rule: 1 fails). Code restored byte-identical each time.
+- Not yet heard on a real call.
+
 ### 2026-11-26 - full-call-recording merged in (v0.9.0)
 
 **D28. Merge `fork/full-call-recording` (commit `4ac1868`, Samuel) into this branch.**
@@ -486,3 +513,4 @@ The tested prompt is in the README (Setup, step 4). It adds one exception to the
 | 2026-11-25 | D16 | `npm test` (3 new take_message tests), then message-saving removed on purpose and restored | 59/59 pass. 2 tests fail without saving. Code restored and matched the backup exactly |
 | 2026-11-25 | `agent-stays-on-call` baseline | `npm test` before branching | 40/40 pass |
 | 2026-11-26 | D28 merge of full-call-recording | (1) `npm test` 3 runs, (2) config flags parsed with a dummy env, (3) 2 deliberate breaks of the recording code, then restored | 84/84 pass each run. Flags default on, turn off, bad value refused. Each break fails 1 test; code restored byte-identical |
+| 2026-11-26 | D29 technician-left cue | (1) `npm test` 3 runs, (2) real report CAd7d4…7cde5 re-rendered, (3) 3 deliberate breaks, then restored | 88/88 pass each run. "Hello? Hello?" relabelled "Resident" in both tabs. Each break fails 1-3 tests; code restored byte-identical |

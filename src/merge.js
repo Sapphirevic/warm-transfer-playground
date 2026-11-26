@@ -19,7 +19,7 @@ const OWN_CHANNEL = 1;
 // ElevenLabs' own tools. They are not the transfer request, so they cannot be used to line up the clocks.
 const SYSTEM_TOOLS = /called (skip_turn|end_call|language_detection|transfer_to_number|transfer_to_agent|play_keypad_touch_tone|voicemail_detection)\b/;
 // Lines Iris hears that are the server's, not a person's.
-const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?/i;
+const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?|the technician has left the call\.?(\s*please speak to the caller again\.?)?/i;
 const ROOM_ANNOUNCEMENT = /a technician has joined the call\.?/i;
 
 const MATCH_WINDOW_MS = 15_000; // how far apart in time an ElevenLabs line and a Twilio line may be
@@ -217,7 +217,8 @@ function buildMergedTranscript(r) {
     if (u.matched.length) continue;
     const related = human.some((line) => Math.abs(ms(u.at) - ms(line.at)) <= MATCH_WINDOW_MS && containment(line.text, u.text) >= RELATED);
     if (related) continue;
-    const speaker = joinedAt && u.at >= joinedAt ? 'Resident or technician' : 'Resident';
+    const techLeftAt = ((r.technicians || []).find((tech) => tech.outcome === 'accepted') || {}).line_closed_at;
+    const speaker = joinedAt && u.at >= joinedAt && (!techLeftAt || u.at < techLeftAt) ? 'Resident or technician' : 'Resident';
     rows.push({ kind: 'line', at: u.at, speaker, text: u.text, textFrom: human.length ? 'ElevenLabs only (speaker from timing)' : 'ElevenLabs (speaker from timing)', uncertain: true });
   }
 

@@ -344,6 +344,9 @@ function renderTranscript(r) {
   const rows = elevenLabsLines(r);
   rows.push({ at: r.started_at, role: 'marker', text: 'Iris asked for a technician (request_transfer)' });
   const joinedAt = r.result === 'connected' ? r.finished_at : null;
+  // Once the technician's line has closed, the caller side is the resident alone again.
+  const techWinner = (r.technicians || []).find((tech) => tech.outcome === 'accepted');
+  const techLeftAt = techWinner ? techWinner.line_closed_at : null;
   if (r.result && r.finished_at) {
     const ending = {
       connected: `Technician ${r.connected_technician} joined the call`,
@@ -381,7 +384,7 @@ function renderTranscript(r) {
   //  - the room announcement "A technician has joined the call." in Twilio's voice
   // Speech recognition may write numbers as words and may merge the caller's own words
   // into the same line, so the match is loose and any extra words are flagged.
-  const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?/i;
+  const CUE_TO_IRIS = /technician \w+ did not pick up\.?(\s*calling technician \w+ now\.?)?|no technician is available right now\.?|the technician has left the call\.?(\s*please speak to the caller again\.?)?/i;
   const ROOM_ANNOUNCEMENT = /a technician has joined the call\.?/i;
   const extraWords = (text, re) => /[a-z]/i.test(text.replace(re, ''));
   const serverLine = (row) => {
@@ -402,7 +405,7 @@ function renderTranscript(r) {
     if (row.role === 'tool') return 'Iris (tool)';
     const server = serverLine(row);
     if (server) return server.label;
-    if (joinedAt && row.at && row.at >= joinedAt && r.transfer_style) return 'Resident or technician';
+    if (joinedAt && row.at && row.at >= joinedAt && (!techLeftAt || row.at < techLeftAt) && r.transfer_style) return 'Resident or technician';
     return 'Resident';
   };
   const rowClass = (row) => {
@@ -434,7 +437,7 @@ ${body.join('\n')}
 // Server lines that can show up in a live transcript. The room announcement is heard by
 // everyone; the cues are played to Iris's leg only.
 const ROOM_JOINED_LINE = /a technician has joined the call/i;
-const CUE_TO_IRIS_LINE = /technician \w+ did not pick up|no technician is available right now/i;
+const CUE_TO_IRIS_LINE = /technician \w+ did not pick up|no technician is available right now|the technician has left the call/i;
 
 const recordingRank = (rec) => ({ room: 0, resident: 1, technician: 2 })[rec.kind] ?? 3;
 

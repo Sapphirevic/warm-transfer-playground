@@ -467,11 +467,13 @@ test('after connecting: the call survives the technician or Iris leaving, and en
   await s.residentAsksForTransfer();
   await s.techAcceptsAndJoins(0);
 
-  // Technician hangs up: the resident is still with Iris, who gets her voice back.
+  // Technician hangs up: the resident is still with Iris, who gets her voice back and is
+  // told the technician has gone (D29), in that order.
   await s.tech(0).leaves();
+  await tick();
   assert.equal(s.roomEnded(), false);
   assert.equal(s.state.residentCalls.get(RESIDENT).present.size, 2);
-  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined', 'mute:false']);
+  assert.deepEqual(s.roomActions, ['mute:true', 'announce:joined', 'mute:false', 'cue:left']);
   assert.equal(s.state.residentCalls.get(RESIDENT).agent.muted, false);
   assert.ok(s.report().agent_unmuted_at);
 
@@ -2069,4 +2071,86 @@ test('recordings: with everything off, no line recording or live transcript is r
   assert.equal(s.legRecordings.length, 0);
   assert.equal(s.techCalls()[0].record, undefined);
   assert.match(inbound.text, /record="record-from-start"/, 'the room recording is always made');
+});
+
+// ---------------------------------------------------------------- technician leaves (D29)
+
+test('technician leaves: Iris is unmuted, then told on her leg only that the technician has gone (the 16:33 silence)', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.techAcceptsAndJoins(0);
+  await tick();
+  const iris = s.agentLegs[0].callSid;
+
+  await s.tech(0).leaves();
+  await tick();
+  assert.deepEqual(s.roomActions.slice(-2), ['mute:false', 'cue:left'], 'voice back first, then the cue');
+  const cue = s.agentCues.at(-1);
+  assert.equal(cue.callSid, iris, "the cue goes to Iris's leg only");
+  assert.equal(s.announcements().filter((k) => k === 'left').length, 0, 'not announced to the room');
+
+  // What Twilio says on Iris's leg when it fetches the cue.
+  const played = await s.hook('/conference/announce?kind=left', { CallSid: iris });
+  assert.match(played.text, /<Say>The technician has left the call\. Please speak to the caller again\.<\/Say>/);
+  assert.ok(s.logs.some((line) => line.includes('CUE to Iris only "The technician has left the call.')));
+});
+
+test('technician leaves while Iris is still finishing her sentence: no mute, no announcement, she is just told', async (t) => {
+  const s = await setup({ handoverMaxWaitMs: 2000 });
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  const iris = s.agentLegs[0].callSid;
+  await s.room('participant-speech-start', { CallSid: iris }); // Iris mid-sentence
+  await s.techAcceptsAndJoins(0);
+  await tick();
+  assert.deepEqual(s.roomActions, [], 'handover waiting for her sentence');
+
+  await s.tech(0).leaves();
+  await s.room('participant-speech-stop', { CallSid: iris });
+  await tick();
+  assert.ok(s.logs.some((line) => line.includes('HANDOVER cancelled: the technician left before Iris was muted')));
+  assert.deepEqual(s.mutes, [], 'never muted: there is nobody to hand over to');
+  assert.ok(!s.announcements().includes('joined'), 'the room is not told a technician joined');
+  assert.deepEqual(s.roomActions, ['cue:left']);
+});
+
+test('technician leaves after the resident: no cue', async (t) => {
+  const s = await setup();
+  t.after(s.close);
+  await s.residentAsksForTransfer();
+  await s.techAcceptsAndJoins(0);
+  await tick();
+  await s.room('participant-leave', { CallSid: RESIDENT });
+  await s.tech(0).leaves();
+  await tick();
+  assert.ok(!s.roomActions.includes('cue:left'));
+});
+
+test('transcript: the "technician has left" cue is labelled as a cue to Iris only', () => {
+  const { renderDetail } = require('../src/reports');
+  const at = (sec) => new Date(Date.UTC(2026, 10, 26, 16, 32, sec)).toISOString();
+  const report = {
+    resident_call_sid: RESIDENT, resident_number: RESIDENT_NUMBER, started_at: at(0), finished_at: at(20), result: 'connected',
+    connected_technician: '+15550000001', transfer_style: 'agent stays on the call',
+    technicians: [{ number: '+15550000001', outcome: 'accepted', line_closed_at: at(40) }],
+    hold_periods: [], agent_mute_periods: [{ from: at(20), to: at(40) }], resident_updates: [],
+    transcript: { status: 'final', conversations: [{ conversation_id: 'c1', status: 'done', started_at: new Date(Date.parse(at(0)) - 10_000).toISOString(), entries: [
+      { role: 'tool', text: 'called request_transfer', seconds: 10 },
+      { role: 'user', text: 'Thanks, I can see the problem now.', seconds: 35 },
+      { role: 'user', text: 'The technician has left the call. Please speak to the caller again.', seconds: 51 },
+      { role: 'agent', text: 'I am still here. Did the technician sort it out?', seconds: 53 },
+      { role: 'user', text: 'Hello? Hello?', seconds: 56 },
+    ] }] },
+  };
+  const page = renderDetail(report);
+  const el = panelOf(page, 'elevenlabs');
+  assert.match(el, /<td>Cue to Iris only \(resident did not hear it\)<\/td><td class="text">The technician has left the call\. Please speak to the caller again\.<\/td>/);
+  assert.match(el, /<td>Iris<\/td><td class="text">I am still here\./, 'heard: she was unmuted');
+  // Speaker from the timeline: either person while the technician is in, the resident once they have gone.
+  assert.match(el, /<td>Resident or technician<\/td><td class="text">Thanks, I can see the problem now\./);
+  assert.match(el, /<td>Resident<\/td><td class="text">Hello\? Hello\?/);
+  const merged = panelOf(page, 'merged');
+  assert.match(merged, /<td>Resident<\/td><td class="text">Hello\? Hello\?/, 'merged view agrees');
+  assert.doesNotMatch(merged, /The technician has left the call\. Please speak/, 'the cue is not a line someone said');
 });
