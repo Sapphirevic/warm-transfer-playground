@@ -14,6 +14,13 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - server start-up error (v0.3.1)
+
+**D17. The server reports when it cannot start.**
+On 2026-11-26 another program already held port 3000. The server printed "listening on http://localhost:3000" and then exited without an error, because Express 5 passes start-up errors to the `listen` callback and `server.js` ignored them.
+
+It now prints `Could not start the server: Port 3000 is already in use…` and exits with code 1. This was checked by starting `server.js` on a deliberately occupied port: it gave that message and exit code 1. The tests pass (59/59).
+
 ### 2026-11-25 - take_message tool (v0.3.0)
 
 **D16. Iris saves messages with a `take_message` tool.**

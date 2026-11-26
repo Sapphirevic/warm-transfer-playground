@@ -23,7 +23,16 @@ const { app } = createApp({
   conversations: createConversationApi(config),
 });
 
-app.listen(config.port, () => {
+// Express 5 calls this with an error if the server could not start (for example the
+// port is already taken). Without this check it would print "listening" and then exit.
+app.listen(config.port, (err) => {
+  if (err) {
+    const hint = err.code === 'EADDRINUSE'
+      ? `Port ${config.port} is already in use by another program. Stop that program, or set PORT in .env to a free port (then update the ngrok tunnel to match).`
+      : err.message;
+    console.error(`Could not start the server: ${hint}`);
+    process.exit(1);
+  }
   console.log(`Warm-transfer playground listening on http://localhost:${config.port}`);
   console.log(`  public URL  : ${config.publicBaseUrl}`);
   console.log('  dial mode   : one at a time, in this order; Iris tells the resident each time one does not pick up');
