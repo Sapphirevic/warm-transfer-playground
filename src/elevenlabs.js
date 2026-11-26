@@ -11,6 +11,11 @@ function createRegisterCall(config) {
       // Only honoured if "first message" overrides are enabled in the agent's security settings.
       clientData.conversation_config_override = { agent: { first_message: firstMessage } };
     }
+    if (config.elevenLabsBranchId) {
+      // Run this agent branch instead of the agent's main branch (ElevenLabs agent
+      // versioning). Without it every call uses main.
+      clientData.branch_id = config.elevenLabsBranchId;
+    }
 
     const response = await fetch(`${config.elevenLabsApiBase}/v1/convai/twilio/register-call`, {
       method: 'POST',

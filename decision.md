@@ -15,6 +15,23 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - choose the ElevenLabs agent branch (v0.5.0)
+
+**D20. `ELEVENLABS_BRANCH_ID` picks which agent branch a call runs on.**
+
+What happened: on call `CA72271a…0845` (12:54 UTC) Twilio, the new TwiML App and Iris's leg all reached this server. But Iris never called `request_transfer`. She said "I'm reaching out to a technician right now, and while we wait…" on every turn, so there was no search and no report. The call ran on the agent's **main** branch, while the team's edits (tools, prompt) were on another branch.
+
+The ElevenLabs docs (personalization, Twilio personalization, versioning and register-call, read 2026-11-26) say `branch_id` belongs inside `conversation_initiation_client_data` and "defaults to the agent's main branch". It is not a top-level field of register-call.
+
+What changed:
+- The server now sends `branch_id` there when `ELEVENLABS_BRANCH_ID` is set, and nothing otherwise.
+- The startup line `agent branch :` shows which branch is in use.
+- The README prompt line "I'm reaching out…" now ends "Say this only once", so a slow or failed tool call cannot make Iris loop on it.
+
+Checks:
+- 61/61 tests pass, including a new one: `branch_id` is sent inside `conversation_initiation_client_data`, not at the top level, and is left out when empty.
+- Not yet checked on a real call: that ElevenLabs actually honours `branch_id` on register-call. The docs list the field in its schema, but no example covers telephony. The ElevenLabs conversation page shows which branch ran.
+
 ### 2026-11-26 - every call is an emergency (prompt only)
 
 **D19. For this task, every call is treated as an emergency.** Iris calls `request_transfer` as soon as the caller has explained the problem, then troubleshoots while the search runs. This replaces the D18 default of troubleshooting first for non-emergencies. It is a prompt change only; the server is unchanged.

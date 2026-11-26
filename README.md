@@ -108,6 +108,8 @@ Run the same command again whenever `PUBLIC_BASE_URL` changes; it then updates t
 
 `call_sid` is always the **resident's** Twilio call SID, even though Iris is on her own leg.
 
+**Agent branches.** If the agent uses ElevenLabs versioning, calls run on its **main** branch unless told otherwise. That includes the tools, prompt and first message. To test a branch, copy its ID (it starts with `agtbrch_`) into `.env` as `ELEVENLABS_BRANCH_ID` and restart the server. The server then sends it as `branch_id` with every call. The startup line `agent branch :` shows which branch is in use. A tool or prompt edited only on a branch has no effect on calls to main: on 2026-11-26 a test call ran on main, which had no working `request_transfer`, so Iris repeated "I'm reaching out to a technician" without ever starting the search.
+
 **Create the `take_message` tool.** A second **Webhook** tool, so a message Iris takes is saved into the call's report:
 
 | Setting | Value |
@@ -139,7 +141,7 @@ Let the caller explain their problem.
 
 Call Transferring: Treat every problem as an emergency. As soon as the caller has explained their problem, immediately call the request_transfer tool with a one-sentence summary of it. Do not wait to finish troubleshooting first.
 
-Then say: "I'm reaching out to a technician right now, and while we wait, let's work on this together." Never ask the caller to hold and never leave them in silence.
+Then say: "I'm reaching out to a technician right now, and while we wait, let's work on this together." Say this only once. Never ask the caller to hold and never leave them in silence.
 
 While the technician is being reached, keep troubleshooting with the caller: ask short questions about what they see, and give simple, safe steps one at a time (for example turning off the water valve, switching off the breaker only if it is safe to reach and they are not standing in water, or leaving the apartment if there is a gas smell or fire). Put safety first.
 

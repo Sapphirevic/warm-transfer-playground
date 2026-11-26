@@ -73,6 +73,9 @@ function loadConfig(env = process.env) {
     twilioPhoneNumber: env.TWILIO_PHONE_NUMBER.trim(),
     elevenLabsApiKey: env.ELEVENLABS_API_KEY.trim(),
     elevenLabsAgentId: env.ELEVENLABS_AGENT_ID.trim(),
+    // Optional: the agent branch to run (ElevenLabs agent versioning, "agtbrch_…").
+    // Empty = the agent's main branch.
+    elevenLabsBranchId: (env.ELEVENLABS_BRANCH_ID || '').trim() || null,
     elevenLabsApiBase: (env.ELEVENLABS_API_BASE || 'https://api.elevenlabs.io').trim().replace(/\/+$/, ''),
     toolSecret: env.TOOL_SECRET.trim(),
     // Called in this order, one at a time.

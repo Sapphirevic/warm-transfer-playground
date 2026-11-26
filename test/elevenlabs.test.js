@@ -9,7 +9,7 @@ const { createRegisterCall, createConversationApi } = require('../src/elevenlabs
 
 const TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://agent.example.test"/></Connect></Response>';
 
-async function stubApi(respond) {
+async function stubApi(respond, extraConfig = {}) {
   const seen = [];
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -24,6 +24,7 @@ async function stubApi(respond) {
     elevenLabsApiBase: `http://localhost:${server.address().port}`,
     elevenLabsApiKey: 'test-key',
     elevenLabsAgentId: 'agent_test',
+    ...extraConfig,
   };
   return { seen, registerCall: createRegisterCall(config), close: () => new Promise((resolve) => server.close(resolve)) };
 }
@@ -135,4 +136,18 @@ test('conversations for a call: if the filter is rejected, recent conversations 
   assert.deepEqual(found.map((c) => c.conversation_id), ['conv_ours']);
   assert.equal(stub.seen[1].path, '/v1/convai/conversations');
   assert.equal('dynamic_variable_filter' in stub.seen[1].query, false, 'second attempt has no filter');
+});
+
+test('register-call: ELEVENLABS_BRANCH_ID is sent as branch_id inside conversation_initiation_client_data, and left out when empty', async (t) => {
+  const twiml = '<Response><Connect><Stream url="wss://x"/></Connect></Response>';
+  const branch = await stubApi((res) => res.end(twiml), { elevenLabsBranchId: 'agtbrch_test123' });
+  t.after(branch.close);
+  await branch.registerCall({ fromNumber: '+1555', toNumber: '+1666', direction: 'inbound', callSid: 'CA123' });
+  assert.equal(branch.seen[0].body.conversation_initiation_client_data.branch_id, 'agtbrch_test123');
+  assert.equal('branch_id' in branch.seen[0].body, false, 'not a top-level field of register-call');
+
+  const main = await stubApi((res) => res.end(twiml), { elevenLabsBranchId: null });
+  t.after(main.close);
+  await main.registerCall({ fromNumber: '+1555', toNumber: '+1666', direction: 'inbound', callSid: 'CA123' });
+  assert.equal('branch_id' in main.seen[0].body.conversation_initiation_client_data, false, 'main branch: nothing sent');
 });
