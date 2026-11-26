@@ -15,6 +15,34 @@ Update it whenever a design choice is made or changed, and in the same commit as
 
 ## Decisions
 
+### 2026-11-26 - own agent, own tools, own tunnel: first working call on this branch
+
+**D21. Each tester has their own ElevenLabs agent, tools, TwiML App and ngrok tunnel.**
+
+How it played out:
+- Calls went to a colleague's server while both used his ngrok domain. Then an agent branch was ignored on phone calls (D20).
+- Then a duplicated agent ("Sequential Testing -Victoria") was copied from Main. Its prompt never called `request_transfer`, even in Preview.
+
+Working setup (`agent_1101…ns1b`, "Sequential Testing-Victoria1"):
+- **Prompt:** the same as the original "Sequential Testing" prompt, which does call the tool.
+- **Tools:** with the team's go-ahead, its own two webhook tools were created through the ElevenLabs API (`request_transfer` `tool_5601…8pxq`, `take_message` `tool_2401…bd7j`). They are attached in place of the tool it shared with the original agent. Prompt, LLM (`deepseek-v41-flash`), first message and system tools were left unchanged. 15 read-back checks passed (URL, method, exact header name, secret value, LLM-filled field, `call_sid` from the dynamic variable, required fields). A Preview placeholder for `call_sid` is set on the tools.
+- **The colleague** uses his own agent ("Sequential Testing - Samuel") with tools pointing at his own ngrok address.
+
+**Random ngrok addresses break everything on each restart.** At 14:07 the tunnel restarted with a new address. The tools, created minutes earlier, pointed at the old one (ngrok `ERR_NGROK_3200`, endpoint offline). The fix each time:
+- Re-point the tools (done via the API).
+- Run `node scripts/setup-agent-app.js` for the TwiML App.
+- Restart the server.
+
+Open: claim the free fixed ngrok domain and add an `NGROK_DOMAIN` setting to `scripts/tunnel.js` so the address never changes.
+
+**First working call on this branch:** `CA1c19d3…` (14:12 UTC, outbound).
+- The report was created and `request_transfer` reached the server.
+- No hold music, and Iris was not muted during the search.
+- Technician 1 was dialled at +0 s and the others were not called.
+- The resident hung up at 15.2 s, and technician 1's call was cancelled.
+
+Still to test on a real call with this setup: a technician update, a technician joining (Iris muted), and a saved message.
+
 ### 2026-11-26 - choose the ElevenLabs agent branch (v0.5.0)
 
 **D20. `ELEVENLABS_BRANCH_ID` picks which agent branch a call runs on.**
