@@ -39,6 +39,9 @@ app.listen(config.port, (err) => {
   console.log(`  technicians : ${config.techNumbers.join(', ')}`);
   console.log(`  ring timeout: ${config.ringTimeoutSec}s`);
   console.log(`  transfer    : agent stays on the call (Iris leg via TwiML App ${config.agentAppSid})`);
+  // Shortened so it can be compared with the agent ID shown in ElevenLabs at a glance.
+  const agentId = config.elevenLabsAgentId;
+  console.log(`  agent id    : ${agentId.length > 16 ? `${agentId.slice(0, 10)}…${agentId.slice(-4)}` : agentId}`);
   console.log(`  agent branch: ${config.elevenLabsBranchId || 'main (set ELEVENLABS_BRANCH_ID to use another branch)'}`);
   console.log(`  hold music  : ${config.holdDelayMs === null
     ? 'off (Iris troubleshoots with the resident while technicians are called)'
