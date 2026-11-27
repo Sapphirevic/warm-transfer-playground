@@ -298,6 +298,7 @@ function page(title, body) {
   .note { color: #8a5a00; }
   .connected { color: #116611; font-weight: 600; }
   .other { color: #a33; font-weight: 600; }
+  .button { display: inline-block; padding: 7px 12px; border: 1px solid #777; border-radius: 4px; color: #1a1a1a; text-decoration: none; background: #f2f2f2; }
 </style>
 </head>
 <body>
@@ -519,10 +520,12 @@ const TRACK_LABEL = {
   iris: { inbound_track: 'inbound (what Iris hears)', outbound_track: 'outbound (Iris\'s voice)' },
 };
 
-function renderRecordings(r, tw) {
+function renderRecordings(r, tw, audioSources = null) {
   const recordings = [...(tw.recordings || [])].sort((a, b) => recordingRank(a) - recordingRank(b) || (a.technician || 0) - (b.technician || 0));
   const rows = recordings.map((rec) => {
-    const audioUrl = `/reports/${esc(r.resident_call_sid)}/recordings/${esc(rec.recording_sid)}.mp3`;
+    const audioUrl = audioSources
+      ? audioSources[rec.recording_sid] || ''
+      : `/reports/${esc(r.resident_call_sid)}/recordings/${esc(rec.recording_sid)}.mp3`;
     const listen = rec.status === 'completed'
       ? `<audio controls preload="none" src="${audioUrl}"></audio><br><a href="${audioUrl}" download>download .mp3</a>`
       : '-';
@@ -666,9 +669,9 @@ ${renderLiveTranscripts(r, tw)}
 ${renderIntelligence(r, tw)}`;
 }
 
-function renderRecordingsTab(r) {
+function renderRecordingsTab(r, audioSources = null) {
   if (!r.twilio) return `<h2>Recordings</h2>\n${NO_TWILIO}`;
-  return `<h2>Recordings</h2>\n${renderRecordings(r, r.twilio)}`;
+  return `<h2>Recordings</h2>\n${renderRecordings(r, r.twilio, audioSources)}`;
 }
 
 // The Twilio summary of the call: from the resident's recording if there is one (it
@@ -779,7 +782,7 @@ ${rows.join('\n')}
 ${lineNote}`;
 }
 
-function renderDetail(r) {
+function renderDetail(r, { audioSources = null } = {}) {
   const techRows = (r.technicians || []).map((tech, i) => {
     const s = tech.seconds_from_tool_call || {};
     return `<tr>
@@ -797,7 +800,12 @@ function renderDetail(r) {
 </tr>`;
   });
 
+  const downloadable = (r.twilio && r.twilio.recordings || []).some((rec) => rec.status === 'completed' && /^RE[0-9a-f]{32}$/i.test(rec.recording_sid || ''));
+  const downloadButton = !audioSources && downloadable
+    ? `<p><a class="button" href="/reports/${esc(r.resident_call_sid)}/download" download>Download report with audio</a></p>`
+    : '';
   return page(`Transfer ${r.resident_call_sid}`, `<p><a href="/reports">&larr; All transfers</a></p>
+${downloadButton}
 <h1>Transfer for ${dash(r.resident_number)}</h1>
 <div class="wrap"><table>
 <tr><th>Result</th><td class="${r.result === 'connected' ? 'connected' : 'other'}">${resultLabel(r)}</td></tr>
@@ -823,7 +831,7 @@ ${tabs([
     { id: 'merged', label: 'Merged transcript', body: renderMerged(r) },
     { id: 'elevenlabs', label: 'ElevenLabs transcript', body: renderTranscript(r) },
     { id: 'twilio', label: 'Twilio transcripts', body: renderTwilioTranscripts(r) },
-    { id: 'recordings', label: `Recordings${r.twilio ? ` (${(r.twilio.recordings || []).length})` : ''}`, body: renderRecordingsTab(r) },
+    { id: 'recordings', label: `Recordings${r.twilio ? ` (${(r.twilio.recordings || []).length})` : ''}`, body: renderRecordingsTab(r, audioSources) },
     { id: 'technicians', label: 'Technicians', body: `<h2>Technicians</h2>
 <p>Each time is shown with the seconds since the tool call underneath.</p>
 <div class="wrap"><table>

@@ -253,6 +253,8 @@ Every transfer is saved as `reports/<resident_call_sid>.json` and updated as the
 - http://localhost:3000/reports lists all transfers, newest first
 - http://localhost:3000/reports/CA... shows one transfer; add `?format=json` to either URL for the raw data
 
+When a report has completed recordings, its detail page has a **Download report with audio** button. It saves one standalone HTML file with the report and its audio embedded, so it can be opened and played without the server.
+
 The **Agent** column shows `stays` for transfers made on this branch and `leaves` for ones made on `main`, so runs of the two versions can be compared side by side. Reports are shared between branches because `reports/` is not tracked by git.
 
 Each record holds the resident's number and call SID, the summary, the dial mode (always `sequential` on this branch), the start time (the tool call), the final result and how long the resident waited. For each technician it holds the number, when they were dialled, when their phone rang, when they answered, the outcome, and each of those as seconds from the tool call.

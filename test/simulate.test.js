@@ -33,7 +33,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 // holdResumeMs: how long after a "technician did not pick up" update the music comes back.
 // recordLegs / liveTranscription / liveTranscriptionIrisLeg: the Twilio recordings and live
 // transcripts merged from full-call-recording. Off unless a test turns them on.
-async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0, handoverGraceMs = 0, handoverWrapUpWaitMs = 0, handoverReplyWaitMs = 0, recordLegs = false, liveTranscription = false, liveTranscriptionIrisLeg = false } = {}) {
+async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelayMs = null, holdResumeMs = 40, cueQuietGapMs = 0, cueMaxWaitMs = 1000, handoverMaxWaitMs = 1000, updateFallbackMs = 0, handoverGraceMs = 0, handoverWrapUpWaitMs = 0, handoverReplyWaitMs = 0, recordLegs = false, liveTranscription = false, liveTranscriptionIrisLeg = false, fetchImpl = globalThis.fetch } = {}) {
   const created = []; //        calls.create(...)            -> technician calls and /start-call
   const updates = []; //        calls(sid).update(...)
   const legRecordings = []; //  calls(sid).recordings.create(...) -> recording the resident's own line
@@ -171,7 +171,7 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
     return AGENT_TWIML;
   };
 
-  const { app, state } = createApp({ config, client: { calls, conferences }, registerCall, conversations, logger: (line) => logs.push(line) });
+  const { app, state } = createApp({ config, client: { calls, conferences }, registerCall, conversations, logger: (line) => logs.push(line), fetchImpl });
   const server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -199,7 +199,12 @@ async function setup({ techNumbers = ['+15550000001', '+15550000002'], holdDelay
 
   async function get(urlPath, headers = {}) {
     const response = await fetch(local + urlPath, { headers });
-    return { status: response.status, text: await response.text() };
+    return {
+      status: response.status,
+      text: await response.text(),
+      contentType: response.headers.get('content-type'),
+      contentDisposition: response.headers.get('content-disposition'),
+    };
   }
 
   // A conference status callback for the resident's room.
@@ -1240,6 +1245,45 @@ test('reports: HTML list and detail, local browser only', async (t) => {
   // A request that came through the tunnel carries forwarding headers and is refused.
   assert.equal((await s.get('/reports', { 'X-Forwarded-For': '203.0.113.9' })).status, 403);
   assert.equal((await s.get(`/reports/${RESIDENT}`, { 'X-Forwarded-Host': 'x.ngrok-free.dev' })).status, 403);
+});
+
+test('reports: download one standalone HTML report with its audio embedded', async (t) => {
+  const audioBytes = Buffer.from('fake mp3 audio');
+  const fetched = [];
+  const source = await setup();
+  t.after(source.close);
+  await source.residentAsksForTransfer();
+  await source.techAcceptsAndJoins(0);
+  const report = source.report();
+
+  const s = await setup({
+    fetchImpl: async (url, options) => {
+      fetched.push({ url, options });
+      return new Response(audioBytes, { status: 200, headers: { 'Content-Type': 'audio/mpeg' } });
+    },
+  });
+  t.after(s.close);
+
+  const reportPath = path.join(s.config.reportsDir, `${RESIDENT}.json`);
+  const recordingSid = `RE${'1'.repeat(32)}`;
+  report.twilio = {
+    settings: { record_legs: false, live_transcription: false },
+    recordings: [{ recording_sid: recordingSid, kind: 'room', status: 'completed', channels: 1, duration_seconds: 12 }],
+  };
+  fs.writeFileSync(reportPath, JSON.stringify(report));
+
+  const detail = await s.get(`/reports/${RESIDENT}`);
+  assert.match(detail.text, new RegExp(`/reports/${RESIDENT}/download`));
+
+  const downloaded = await s.get(`/reports/${RESIDENT}/download`);
+  assert.equal(downloaded.status, 200);
+  assert.match(downloaded.contentType, /text\/html/);
+  assert.match(downloaded.contentDisposition, new RegExp(`attachment; filename=Transfer-${RESIDENT}\\.html`));
+  assert.match(downloaded.text, /Transfer for \+15551110000/);
+  assert.match(downloaded.text, new RegExp(`data:audio/mpeg;base64,${audioBytes.toString('base64')}`));
+  assert.equal(fetched.length, 1);
+  assert.match(fetched[0].url, new RegExp(`/Recordings/${recordingSid}\\.mp3$`));
+  assert.match(fetched[0].options.headers.Authorization, /^Basic /);
 });
 
 test('reports: summary text is HTML-escaped', async (t) => {

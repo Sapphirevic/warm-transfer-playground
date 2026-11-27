@@ -1818,6 +1818,12 @@ function createApp({ config, client, registerCall, conversations = null, logger 
 
   // ---------------------------------------------------------------- reports
 
+  async function fetchTwilioRecording(recordingSid) {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${config.twilioAccountSid}/Recordings/${recordingSid}.mp3`;
+    const auth = Buffer.from(`${config.twilioAccountSid}:${config.twilioAuthToken}`).toString('base64');
+    return fetchImpl(url, { headers: { Authorization: `Basic ${auth}` } });
+  }
+
   app.get('/reports', localOnly, (req, res) => {
     const all = reports.list();
     if (req.query.format === 'json') return res.json(all);
@@ -1837,6 +1843,43 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     res.type('html').send(renderDetail(report));
   }));
 
+  app.get('/reports/:sid/download', localOnly, wrap(async (req, res) => {
+    let report = reports.get(req.params.sid);
+    if (!report) return res.status(404).send('No report for that call SID.');
+
+    await Promise.race([
+      Promise.all([refreshTranscript(req.params.sid), refreshTwilioTranscripts(req.params.sid)]),
+      new Promise((resolve) => { setTimeout(resolve, 9000).unref(); }),
+    ]);
+    report = reports.get(req.params.sid);
+    if (!report) return res.status(404).send('No report for that call SID.');
+
+    const recordings = (report.twilio && report.twilio.recordings || []).filter((recording) => recording.status === 'completed');
+    if (!recordings.length) return res.status(409).send('No completed audio recordings are available for this report yet.');
+    if (recordings.some((recording) => !RECORDING_SID_RE.test(recording.recording_sid || ''))) {
+      return res.status(502).send('A completed recording has an invalid Recording SID.');
+    }
+
+    const audio = await Promise.all(recordings.map(async (recording) => {
+      try {
+        const response = await fetchTwilioRecording(recording.recording_sid);
+        if (!response.ok) return { error: `Twilio answered HTTP ${response.status} for recording ${recording.recording_sid}.` };
+        return { recording, data: Buffer.from(await response.arrayBuffer()) };
+      } catch (error) {
+        return { error: `Could not download recording ${recording.recording_sid}: ${error.message}` };
+      }
+    }));
+    const failed = audio.find((item) => item.error);
+    if (failed) return res.status(502).send(failed.error);
+
+    const audioSources = Object.fromEntries(audio.map(({ recording, data }) => [
+      recording.recording_sid,
+      `data:audio/mpeg;base64,${data.toString('base64')}`,
+    ]));
+    const html = renderDetail(report, { audioSources });
+    return res.type('html').attachment(`Transfer-${req.params.sid}.html`).send(html);
+  }));
+
   // Plays one of this call's Twilio recordings in the report page. The server downloads it
   // from Twilio with the account credentials, so the browser never needs them.
   app.get('/reports/:sid/recordings/:file', localOnly, wrap(async (req, res) => {
@@ -1844,9 +1887,7 @@ function createApp({ config, client, registerCall, conversations = null, logger 
     const recordingSid = String(req.params.file).replace(/\.mp3$/i, '');
     const known = report && report.twilio && (report.twilio.recordings || []).some((r) => r.recording_sid === recordingSid);
     if (!RECORDING_SID_RE.test(recordingSid) || !known) return res.status(404).send('No such recording for this call.');
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${config.twilioAccountSid}/Recordings/${recordingSid}.mp3`;
-    const auth = Buffer.from(`${config.twilioAccountSid}:${config.twilioAuthToken}`).toString('base64');
-    const response = await fetchImpl(url, { headers: { Authorization: `Basic ${auth}` } });
+    const response = await fetchTwilioRecording(recordingSid);
     if (!response.ok) return res.status(502).send(`Twilio answered HTTP ${response.status} for recording ${recordingSid}.`);
     res.type('audio/mpeg').send(Buffer.from(await response.arrayBuffer()));
   }));
