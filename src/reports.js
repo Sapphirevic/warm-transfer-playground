@@ -115,8 +115,6 @@ function buildReport(t) {
       outcome_at: iso(tech.outcomeAt),
       // Exactly what this technician heard before "Press 1" (null if they never answered).
       briefing: tech.briefing || null,
-      // The last brief the technician heard to the end; one cut short by pressing 1 does not count (D32).
-      briefing_heard_in_full: tech.heardBriefing || null,
       // Newer progress read to them when they pressed 1, before joining (null if none).
       update_on_accept: tech.acceptUpdate || null,
       line_closed_at: iso(tech.endedAt),
